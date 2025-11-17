@@ -1,29 +1,17 @@
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import Ionicons from "@expo/vector-icons/Ionicons";
-import { CalendarScreen } from "../screens/CalendarScreen";
-import { PantryStack } from "./PantryStack";
-import { GroupsScreen } from "../screens/GroupsScreen";
-import { SettingsScreen } from "../screens/SettingsScreen";
+import { FreshStartScreen } from "../screens/FreshStartScreen";
+import { PantryScreen } from "../screens/PantryScreen";
 
 const Tab = createBottomTabNavigator();
 
 const tabBarStyle = {
-  backgroundColor: "#ffffff",
+  backgroundColor: "#050505",
   borderTopWidth: 1,
-  borderTopColor: "#e6e6e6",
-  position: "absolute" as const,
-  left: 16,
-  right: 16,
-  bottom: 16,
-  borderRadius: 999,
-  height: 64,
-  paddingTop: 6,
-  paddingBottom: 6,
-  elevation: 5,
-  shadowColor: "#000",
-  shadowOpacity: 0.25,
-  shadowRadius: 10,
-  shadowOffset: { width: 0, height: 6 },
+  borderTopColor: "#1a1a1a",
+  height: 72,
+  paddingTop: 12,
+  paddingBottom: 12,
 };
 
 const iconMap: Record<string, keyof typeof Ionicons.glyphMap> = {
@@ -39,7 +27,7 @@ export const RootTabs = () => (
       headerShown: false,
       tabBarStyle,
       tabBarActiveTintColor: "#0fb06a",
-      tabBarInactiveTintColor: "#5c5c5c",
+      tabBarInactiveTintColor: "#666666",
       tabBarLabelStyle: {
         fontSize: 10,
         fontWeight: "600",
@@ -49,15 +37,50 @@ export const RootTabs = () => (
         return <Ionicons name={iconName} size={size} color={color} />;
       },
     })}
-    sceneContainerStyle={{ backgroundColor: "#ffffff" }}
+    sceneContainerStyle={{ backgroundColor: "#050505" }}
   >
-    <Tab.Screen name="Calendar" component={CalendarScreen} />
-    <Tab.Screen
-      name="Pantry"
-      component={PantryStack}
-      options={{ headerShown: false }}
-    />
-    <Tab.Screen name="Groups" component={GroupsScreen} />
-    <Tab.Screen name="Settings" component={SettingsScreen} />
+    <Tab.Screen name="Calendar" component={CalendarFreshScreen} />
+    <Tab.Screen name="Pantry" component={PantryScreen} />
+    <Tab.Screen name="Groups" component={GroupsFreshScreen} />
+    <Tab.Screen name="Settings" component={SettingsFreshScreen} />
   </Tab.Navigator>
+);
+
+const CalendarFreshScreen = () => (
+  <FreshStartScreen
+    tag="Calendar"
+    title="Plan your day from scratch"
+    description="Start by deciding what matters for a single day: meals, prep, workouts, or anything else you want to see at a glance."
+    steps={[
+      "Sketch the sections you want visible on day one.",
+      "Add rough component placeholders (cards, checklists, timers).",
+      "Decide how someone updates or reorders items.",
+    ]}
+  />
+);
+
+const GroupsFreshScreen = () => (
+  <FreshStartScreen
+    tag="Groups"
+    title="Nothing is set in stone"
+    description="Use this space to explore how groups or households collaborate—messages, shared plans, or approvals."
+    steps={[
+      "Define who is in a group and what they see.",
+      "Call out the primary shared activity.",
+      "Highlight one metric that makes collaboration worth it.",
+    ]}
+  />
+);
+
+const SettingsFreshScreen = () => (
+  <FreshStartScreen
+    tag="Settings"
+    title="Preferences live here"
+    description="Keep this simple for now. Decide which toggles or inputs you really need before wiring anything up."
+    steps={[
+      "List the decisions a user must make.",
+      "Group related toggles into small cards.",
+      "Plan how to save or undo changes.",
+    ]}
+  />
 );
