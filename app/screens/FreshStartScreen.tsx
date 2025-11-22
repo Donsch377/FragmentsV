@@ -1,5 +1,5 @@
-import { View, Text } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { StyleSheet, View, Text } from "react-native";
 
 type FreshStartScreenProps = {
   title: string;
@@ -14,40 +14,98 @@ export const FreshStartScreen = ({
   steps = [],
   tag,
 }: FreshStartScreenProps) => (
-  <SafeAreaView className="flex-1 bg-[#050505]">
-    <View className="flex-1 justify-between px-6 py-10">
+  <SafeAreaView style={styles.safeArea}>
+    <View style={styles.container}>
       <View>
-        {tag ? (
-          <Text className="text-xs font-semibold uppercase tracking-widest text-white/40">
-            {tag}
-          </Text>
-        ) : null}
-        <Text className="mt-2 text-4xl font-semibold text-white">{title}</Text>
-        <Text className="mt-4 text-base leading-6 text-white/70">
-          {description}
-        </Text>
+        {tag ? <Text style={styles.tag}>{tag}</Text> : null}
+        <Text style={styles.title}>{title}</Text>
+        <Text style={styles.description}>{description}</Text>
       </View>
 
       {steps.length ? (
-        <View className="mt-10 space-y-3">
-          {steps.map((step) => (
+        <View style={styles.steps}>
+          {steps.map((step, index) => (
             <View
               key={step}
-              className="rounded-2xl border border-white/10 px-4 py-3"
+              style={[styles.stepCard, index > 0 && styles.stepCardSpacing]}
             >
-              <Text className="text-base font-semibold text-white/95">
-                {step}
-              </Text>
+              <Text style={styles.stepText}>{step}</Text>
             </View>
           ))}
         </View>
       ) : null}
 
-      <View className="mt-10 rounded-3xl border border-dashed border-white/20 px-4 py-6">
-        <Text className="text-center text-sm text-white/60">
+      <View style={styles.placeholderCard}>
+        <Text style={styles.placeholderText}>
           Drop new components here when you are ready to mock things up.
         </Text>
       </View>
     </View>
   </SafeAreaView>
 );
+
+const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: "#050505",
+  },
+  container: {
+    flex: 1,
+    justifyContent: "space-between",
+    paddingHorizontal: 24,
+    paddingVertical: 32,
+  },
+  tag: {
+    fontSize: 12,
+    fontWeight: "600",
+    letterSpacing: 2,
+    textTransform: "uppercase",
+    color: "rgba(255,255,255,0.4)",
+  },
+  title: {
+    marginTop: 8,
+    fontSize: 34,
+    fontWeight: "600",
+    color: "#ffffff",
+  },
+  description: {
+    marginTop: 16,
+    fontSize: 16,
+    lineHeight: 24,
+    color: "rgba(255,255,255,0.7)",
+  },
+  steps: {
+    marginTop: 32,
+  },
+  stepCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  stepCardSpacing: {
+    marginTop: 12,
+  },
+  stepText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "rgba(255,255,255,0.95)",
+  },
+  placeholderCard: {
+    marginTop: 32,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderStyle: "dashed",
+    borderColor: "rgba(255,255,255,0.2)",
+    paddingVertical: 18,
+    paddingHorizontal: 20,
+  },
+  placeholderText: {
+    textAlign: "center",
+    fontSize: 14,
+    color: "rgba(255,255,255,0.6)",
+  },
+});

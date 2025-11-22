@@ -1,7 +1,8 @@
 import { NavigationContainer, DefaultTheme } from "@react-navigation/native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
-import { RootTabs } from "./app/navigation/RootTabs";
+import { AuthProvider } from "./app/providers/AuthProvider";
+import { AppNavigator } from "./app/navigation/AppNavigator";
 
 const freshTheme = {
   ...DefaultTheme,
@@ -18,10 +19,12 @@ const freshTheme = {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <NavigationContainer theme={freshTheme}>
-        <RootTabs />
-        <StatusBar style="light" />
-      </NavigationContainer>
+      <AuthProvider>
+        <NavigationContainer theme={freshTheme}>
+          <AppNavigator />
+          <StatusBar style="light" />
+        </NavigationContainer>
+      </AuthProvider>
     </SafeAreaProvider>
   );
 }
