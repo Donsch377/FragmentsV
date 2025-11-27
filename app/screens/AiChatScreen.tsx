@@ -2,7 +2,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { StyleSheet, Text, View } from "react-native";
 
 export const AiChatScreen = () => (
-  <SafeAreaView style={styles.safeArea}>
+  <SafeAreaView style={styles.safeArea} edges={["left", "right", "bottom"]}>
     <View style={styles.container}>
       <Text style={styles.heading}>Fragments AI</Text>
       <Text style={styles.description}>

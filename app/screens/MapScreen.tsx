@@ -2,7 +2,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { StyleSheet, Text, View } from "react-native";
 
 export const MapScreen = () => (
-  <SafeAreaView style={styles.safeArea}>
+  <SafeAreaView style={styles.safeArea} edges={["left", "right", "bottom"]}>
     <View style={styles.container}>
       <Text style={styles.title}>Map view</Text>
       <Text style={styles.subtitle}>

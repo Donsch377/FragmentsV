@@ -36,4 +36,5 @@ export type EditableFood = {
   cost?: number | null;
   group_id?: string | null;
   group_name?: string | null;
+  image_url?: string | null;
 };

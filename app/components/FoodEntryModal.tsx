@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import {
+  ActivityIndicator,
   Alert,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -11,6 +13,10 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { useCameraPermissions } from "expo-camera";
+import type { BarcodeScanningResult, CameraViewProps } from "expo-camera";
+import { DEFAULT_FOOD_IMAGE } from "../constants/images";
+import { lookupBarcode, type BarcodeLookupResult } from "../features/barcodeLookup";
 import { supabase } from "../lib/supabaseClient";
 import type {
   EditableFood,
@@ -78,9 +84,16 @@ export const FoodEntryModal = ({
   const [location, setLocation] = useState("");
   const [barcode, setBarcode] = useState("");
   const [cost, setCost] = useState("");
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [servings, setServings] = useState<ServingInput[]>([createServing()]);
   const [saving, setSaving] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
+  const [isScannerVisible, setIsScannerVisible] = useState(false);
+  const [isLookupLoading, setIsLookupLoading] = useState(false);
+  const scannerLockRef = useRef(false);
+  const cameraModuleRef = useRef<typeof import("expo-camera") | null>(null);
+  const [scannerComponent, setScannerComponent] = useState<ComponentType<CameraViewProps> | null>(null);
+  const [permission, requestPermission] = useCameraPermissions();
 
   const canAdd = useMemo(() => name.trim().length > 0 && servings.length > 0, [name, servings.length]);
 
@@ -90,9 +103,13 @@ export const FoodEntryModal = ({
     setLocation("");
     setBarcode("");
     setCost("");
+    setImageUrl(null);
     setServings([createServing()]);
     setErrorText(null);
     setSaving(false);
+    setIsScannerVisible(false);
+    setScannerComponent(null);
+    scannerLockRef.current = false;
   };
 
   const handleClose = () => {
@@ -126,6 +143,229 @@ export const FoodEntryModal = ({
     setServings((prev) => (prev.length <= 1 ? prev : prev.filter((s) => s.id !== id)));
   };
 
+  type OpenFoodFactsProductShape = Extract<
+    BarcodeLookupResult,
+    { source: "openfoodfacts" }
+  >["product"];
+
+  const ensureCameraModule = async () => {
+    if (cameraModuleRef.current) {
+      return cameraModuleRef.current;
+    }
+    try {
+      const module = await import("expo-camera");
+      cameraModuleRef.current = module;
+      return module;
+    } catch (error) {
+      console.warn("Camera module unavailable:", error);
+      return null;
+    }
+  };
+
+  const handleScanPress = async () => {
+    try {
+      const module = await ensureCameraModule();
+      if (!module) {
+        Alert.alert(
+          "Camera unavailable",
+          "This build does not include the Expo Camera module. Enter the barcode manually.",
+        );
+        return;
+      }
+
+      if (!permission?.granted) {
+        const status = await requestPermission?.();
+        if (!status?.granted) {
+          Alert.alert(
+            "Camera permission needed",
+            "Enable camera access to scan barcodes, or enter the code manually.",
+          );
+          return;
+        }
+      }
+
+      setScannerComponent(() => module.CameraView);
+      scannerLockRef.current = false;
+      setIsScannerVisible(true);
+    } catch (error) {
+      console.warn(error);
+      Alert.alert("Scanner unavailable", "Unable to launch the camera scanner right now.");
+    }
+  };
+
+  const handleBarcodeScanned = async ({ data }: BarcodeScanningResult) => {
+    if (!data || scannerLockRef.current) {
+      return;
+    }
+    scannerLockRef.current = true;
+    setIsScannerVisible(false);
+    const trimmed = data.trim();
+    if (!trimmed) {
+      Alert.alert("Invalid barcode", "We couldn't read that code. Please try again.");
+      scannerLockRef.current = false;
+      return;
+    }
+    await hydrateFromBarcode(trimmed);
+    scannerLockRef.current = false;
+  };
+
+  const hydrateFromBarcode = async (code: string) => {
+    try {
+      setIsLookupLoading(true);
+      const result = await lookupBarcode(code);
+      setBarcode(code);
+      applyLookupResult(result);
+    } catch (error) {
+      console.error(error);
+      Alert.alert("Lookup failed", "We couldn't fetch any info for that barcode.");
+    } finally {
+      setIsLookupLoading(false);
+    }
+  };
+
+  const applyLookupResult = (result: BarcodeLookupResult) => {
+    setImageUrl(result.photoUrl || DEFAULT_FOOD_IMAGE);
+    if (result.source === "supabase") {
+      const { food, servings: dbServings } = result;
+      setName(food.name ?? "");
+      setBestBy(food.best_by ?? "");
+      setLocation(food.location ?? "");
+      setCost(food.cost !== null && food.cost !== undefined ? String(food.cost) : "");
+      if (dbServings.length) {
+        setServings(dbServings.map(mapServingFromDBRow));
+      }
+      Alert.alert("Found in pantry", "We loaded this item from your saved foods.");
+      return;
+    }
+
+    if (result.source === "openfoodfacts") {
+      const serving = buildServingFromOpenFoodFacts(result.product);
+      if (result.product.name) {
+        setName(result.product.name);
+      }
+      if (serving) {
+        setServings([serving]);
+      }
+      Alert.alert("Pulled from OpenFoodFacts", "Review the auto-filled nutrition details.");
+      return;
+    }
+
+    Alert.alert("No match found", "Enter the details manually and they will be saved for next time.");
+  };
+
+  const mapServingFromDBRow = (serving: ServingFromDB): ServingInput =>
+    createServing({
+      id: serving.id,
+      label: serving.label ?? "Serving",
+      amount: serving.amount !== null && serving.amount !== undefined ? String(serving.amount) : "",
+      unit: serving.unit ?? "",
+      nutrients: {
+        energy_kcal: serving.energy_kcal !== null ? String(serving.energy_kcal) : "",
+        protein_g: serving.protein_g !== null ? String(serving.protein_g) : "",
+        carbs_g: serving.carbs_g !== null ? String(serving.carbs_g) : "",
+        fat_g: serving.fat_g !== null ? String(serving.fat_g) : "",
+        sat_fat_g: serving.sat_fat_g !== null ? String(serving.sat_fat_g) : "",
+        trans_fat_g: serving.trans_fat_g !== null ? String(serving.trans_fat_g) : "",
+        fiber_g: serving.fiber_g !== null ? String(serving.fiber_g) : "",
+        sugar_g: serving.sugar_g !== null ? String(serving.sugar_g) : "",
+        sodium_mg: serving.sodium_mg !== null ? String(serving.sodium_mg) : "",
+      },
+    });
+
+  const buildServingFromOpenFoodFacts = (product: OpenFoodFactsProductShape): ServingInput | null => {
+    const { label, amount, unit } = parseServingSize(product.servingSize);
+    const nutriments = product.nutriments ?? {};
+    const energyKcal =
+      pickNutrimentValue(nutriments, ["energy-kcal_serving", "energy-kcal_100g"]) ??
+      convertKjToKcal(pickNutrimentValue(nutriments, ["energy-kj_serving", "energy-kj_100g"]));
+
+    const sodiumValue = pickNutrimentValue(nutriments, ["sodium_serving", "sodium_100g"]);
+    const saltValue = pickNutrimentValue(nutriments, ["salt_serving", "salt_100g"]);
+    const sodiumMg = sodiumValue !== null ? sodiumValue * 1000 : saltValue !== null ? saltValue * 400 : null;
+
+    const nutrients: NutrientSet = {
+      energy_kcal: formatNutrientValue(energyKcal),
+      protein_g: formatNutrientValue(pickNutrimentValue(nutriments, ["proteins_serving", "proteins_100g"])),
+      carbs_g: formatNutrientValue(
+        pickNutrimentValue(nutriments, ["carbohydrates_serving", "carbohydrates_100g"]),
+      ),
+      fat_g: formatNutrientValue(pickNutrimentValue(nutriments, ["fat_serving", "fat_100g"])),
+      sat_fat_g: formatNutrientValue(
+        pickNutrimentValue(nutriments, ["saturated-fat_serving", "saturated-fat_100g"]),
+      ),
+      trans_fat_g: formatNutrientValue(
+        pickNutrimentValue(nutriments, ["trans-fat_serving", "trans-fat_100g"]),
+      ),
+      fiber_g: formatNutrientValue(pickNutrimentValue(nutriments, ["fiber_serving", "fiber_100g"])),
+      sugar_g: formatNutrientValue(pickNutrimentValue(nutriments, ["sugars_serving", "sugars_100g"])),
+      sodium_mg: formatNutrientValue(sodiumMg),
+    };
+
+    return createServing({
+      label,
+      amount,
+      unit,
+      nutrients,
+    });
+  };
+
+  const parseServingSize = (value?: string | null) => {
+    if (!value) {
+      return { label: "Per 100g", amount: "100", unit: "g" };
+    }
+    const cleaned = value.trim();
+    const match = cleaned.match(/^([\d.]+)\s*(.*)$/);
+    if (!match) {
+      return { label: `Per ${cleaned}`, amount: "1", unit: cleaned || "serving" };
+    }
+    const [, qty, rest] = match;
+    return {
+      label: `Per ${cleaned}`,
+      amount: qty || "1",
+      unit: rest?.trim() || "serving",
+    };
+  };
+
+  const pickNutrimentValue = (
+    nutriments: Record<string, number | string | undefined>,
+    keys: string[],
+  ): number | null => {
+    for (const key of keys) {
+      const raw = nutriments[key];
+      const value = toNumber(raw);
+      if (typeof value === "number" && !Number.isNaN(value)) {
+        return value;
+      }
+    }
+    return null;
+  };
+
+  const toNumber = (value: number | string | undefined | null): number | null => {
+    if (typeof value === "number") {
+      return value;
+    }
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? null : parsed;
+    }
+    return null;
+  };
+
+  const formatNutrientValue = (value: number | null | undefined): string => {
+    if (value === null || value === undefined) {
+      return "";
+    }
+    const rounded = Math.round(value * 100) / 100;
+    return Number.isFinite(rounded) ? String(rounded) : "";
+  };
+
+  const convertKjToKcal = (value: number | null): number | null => {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    return value / 4.184;
+  };
+
   useEffect(() => {
     if (!visible) {
       resetState();
@@ -142,28 +382,9 @@ export const FoodEntryModal = ({
           ? String(foodToEdit.cost)
           : "",
       );
+      setImageUrl(foodToEdit.image_url ?? null);
       if (servingsToEdit.length) {
-        setServings(
-          servingsToEdit.map((serving) =>
-            createServing({
-              id: serving.id,
-              label: serving.label ?? "Serving",
-              amount: serving.amount !== null && serving.amount !== undefined ? String(serving.amount) : "",
-              unit: serving.unit ?? "",
-              nutrients: {
-                energy_kcal: serving.energy_kcal !== null ? String(serving.energy_kcal) : "",
-                protein_g: serving.protein_g !== null ? String(serving.protein_g) : "",
-                carbs_g: serving.carbs_g !== null ? String(serving.carbs_g) : "",
-                fat_g: serving.fat_g !== null ? String(serving.fat_g) : "",
-                sat_fat_g: serving.sat_fat_g !== null ? String(serving.sat_fat_g) : "",
-                trans_fat_g: serving.trans_fat_g !== null ? String(serving.trans_fat_g) : "",
-                fiber_g: serving.fiber_g !== null ? String(serving.fiber_g) : "",
-                sugar_g: serving.sugar_g !== null ? String(serving.sugar_g) : "",
-                sodium_mg: serving.sodium_mg !== null ? String(serving.sodium_mg) : "",
-              },
-            }),
-          ),
-        );
+        setServings(servingsToEdit.map(mapServingFromDBRow));
       } else {
         setServings([createServing()]);
       }
@@ -188,7 +409,7 @@ export const FoodEntryModal = ({
         name: name.trim(),
         notes: null,
         quantity: null,
-        image_url: null,
+        image_url: imageUrl || null,
         group_name: foodToEdit?.group_name ?? defaultGroupName ?? null,
         group_id: foodToEdit?.group_id ?? defaultGroupId ?? null,
         best_by: bestBy || null,
@@ -261,8 +482,11 @@ export const FoodEntryModal = ({
     }
   };
 
+  const Scanner = scannerComponent;
+
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={handleClose}>
+    <>
+      <Modal visible={visible} animationType="slide" transparent onRequestClose={handleClose}>
       <KeyboardAvoidingView
         style={styles.backdrop}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
@@ -270,6 +494,16 @@ export const FoodEntryModal = ({
         <View style={styles.modalCard}>
           <ScrollView contentContainerStyle={styles.contentContainer}>
             <Text style={styles.title}>{mode === "edit" ? "Edit food" : "Add food"}</Text>
+            <View style={styles.photoPreviewWrapper}>
+              <Image
+                source={{ uri: imageUrl || DEFAULT_FOOD_IMAGE }}
+                style={styles.photoPreview}
+                resizeMode="cover"
+              />
+              <Text style={styles.photoHint}>
+                This photo updates automatically when data is found for your barcode.
+              </Text>
+            </View>
 
             {/* Basic info */}
             <View style={styles.section}>
@@ -305,8 +539,19 @@ export const FoodEntryModal = ({
                   value={barcode}
                   onChangeText={setBarcode}
                 />
-                <TouchableOpacity style={styles.scanButton} disabled>
-                  <Text style={styles.scanButtonText}>Scan</Text>
+                <TouchableOpacity
+                  style={[
+                    styles.scanButton,
+                    (isLookupLoading || saving) && styles.scanButtonDisabled,
+                  ]}
+                  onPress={handleScanPress}
+                  disabled={isLookupLoading || saving}
+                >
+                  {isLookupLoading ? (
+                    <ActivityIndicator size="small" color="#050505" />
+                  ) : (
+                    <Text style={styles.scanButtonText}>Scan</Text>
+                  )}
                 </TouchableOpacity>
               </View>
               <TextInput
@@ -414,7 +659,11 @@ export const FoodEntryModal = ({
 
             {/* Actions */}
             <View style={styles.actionsRow}>
-              <TouchableOpacity style={styles.secondaryButton} onPress={handleClose} disabled={saving}>
+              <TouchableOpacity
+                style={styles.secondaryButton}
+                onPress={handleClose}
+                disabled={saving}
+              >
                 <Text style={styles.secondaryButtonText}>Close</Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -422,13 +671,44 @@ export const FoodEntryModal = ({
                 onPress={handleSave}
                 disabled={!canAdd || saving}
               >
-                <Text style={styles.primaryButtonText}>{saving ? "Adding..." : "Add"}</Text>
+                <Text style={styles.primaryButtonText}>
+                  {saving ? "Saving..." : mode === "edit" ? "Save" : "Add"}
+                </Text>
               </TouchableOpacity>
             </View>
           </ScrollView>
         </View>
       </KeyboardAvoidingView>
     </Modal>
+    <Modal visible={isScannerVisible} animationType="fade" presentationStyle="fullScreen">
+      <View style={styles.scannerContainer}>
+        {Scanner ? (
+          <Scanner
+            style={styles.cameraPreview}
+            facing="back"
+            onBarcodeScanned={handleBarcodeScanned}
+          />
+        ) : (
+          <View style={styles.scannerUnavailable}>
+            <Text style={styles.scannerText}>Scanner module missing in this build.</Text>
+          </View>
+        )}
+        <View style={styles.scannerOverlay}>
+          <Text style={styles.scannerText}>Align the barcode within the frame</Text>
+          <TouchableOpacity
+            style={styles.scannerCloseButton}
+            onPress={() => {
+              setIsScannerVisible(false);
+              setScannerComponent(null);
+              scannerLockRef.current = false;
+            }}
+          >
+            <Text style={styles.scannerCloseText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  </>
   );
 };
 
@@ -457,6 +737,25 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: "600",
     color: "#ffffff",
+  },
+  photoPreviewWrapper: {
+    borderRadius: 20,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    backgroundColor: "#060e1c",
+    padding: 10,
+    gap: 6,
+  },
+  photoPreview: {
+    width: "100%",
+    height: 150,
+    borderRadius: 12,
+    backgroundColor: "#04070f",
+  },
+  photoHint: {
+    fontSize: 11,
+    color: "rgba(255,255,255,0.6)",
   },
   section: {
     borderRadius: 20,
@@ -496,6 +795,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     alignItems: "center",
     justifyContent: "center",
+  },
+  scanButtonDisabled: {
+    opacity: 0.6,
   },
   scanButtonText: {
     color: "rgba(255,255,255,0.8)",
@@ -661,5 +963,44 @@ const styles = StyleSheet.create({
   errorText: {
     color: "#f97373",
     fontSize: 13,
+  },
+  scannerContainer: {
+    flex: 1,
+    backgroundColor: "#000",
+    justifyContent: "flex-end",
+  },
+  scannerOverlay: {
+    paddingBottom: 40,
+    paddingHorizontal: 24,
+    alignItems: "center",
+    gap: 16,
+  },
+  cameraPreview: {
+    flex: 1,
+    alignSelf: "stretch",
+  },
+  scannerText: {
+    color: "#ffffff",
+    fontSize: 16,
+    textAlign: "center",
+  },
+  scannerCloseButton: {
+    paddingHorizontal: 32,
+    paddingVertical: 12,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.4)",
+    backgroundColor: "rgba(0,0,0,0.6)",
+  },
+  scannerCloseText: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  scannerUnavailable: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#000000",
   },
 });

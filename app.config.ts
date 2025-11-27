@@ -31,5 +31,5 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     USE_LOCAL_DB: true,
     DEV_USER_ID: "dev",
   },
-  plugins: ["expo-barcode-scanner"],
+  plugins: ["expo-camera"],
 });

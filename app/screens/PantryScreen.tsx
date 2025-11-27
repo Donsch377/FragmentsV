@@ -18,13 +18,12 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabaseClient";
 import { FoodEntryModal } from "../components/FoodEntryModal";
 import type { EditableFood, ServingFromDB } from "../types/food";
+import { DEFAULT_FOOD_IMAGE } from "../constants/images";
 
 const PANTRY_TAB_OPTIONS = ["Foods", "Recipes"] as const;
 type PantryTab = (typeof PANTRY_TAB_OPTIONS)[number];
 
 const DEFAULT_GROUP_NAMES: string[] = [];
-const FALLBACK_IMAGE =
-  "https://images.unsplash.com/photo-1466978913421-dad2ebd01d17?auto=format&fit=crop&w=800&q=80";
 
 const NUTRIENT_DISPLAY = [
   { key: "energy_kcal", label: "Energy", unit: "kcal" },
@@ -498,6 +497,7 @@ export const PantryScreen = () => {
     <SafeAreaView
       style={styles.safeArea}
       ref={containerRef}
+      edges={["left", "right", "bottom"]}
       onLayout={() => {
         containerRef.current?.measureInWindow((x, y) => {
           setContainerOffset({ x, y });
@@ -681,7 +681,7 @@ export const PantryScreen = () => {
             >
               <View style={styles.detailHeroWrapper}>
                 <Animated.Image
-                  source={{ uri: activeFood.image_url || FALLBACK_IMAGE }}
+                  source={{ uri: activeFood.image_url || DEFAULT_FOOD_IMAGE }}
                   style={[
                     styles.detailImage,
                     {
@@ -1022,7 +1022,7 @@ const FoodCard = ({ food, onPress, onDelete }: FoodCardProps) => {
       ref={cardRef}
     >
       <View>
-        <Image source={{ uri: food.image_url || FALLBACK_IMAGE }} style={styles.foodImage} />
+        <Image source={{ uri: food.image_url || DEFAULT_FOOD_IMAGE }} style={styles.foodImage} />
         <TouchableOpacity
           style={styles.foodDelete}
           onPress={(event) => {
@@ -1064,7 +1064,7 @@ const RecipeCard = ({ recipe, onPress }: RecipeCardProps) => {
   return (
     <TouchableOpacity activeOpacity={0.9} onPress={handlePress} style={styles.recipeCard} ref={cardRef}>
       <View>
-        <Image source={{ uri: recipe.image_url || FALLBACK_IMAGE }} style={styles.foodImage} />
+        <Image source={{ uri: recipe.image_url || DEFAULT_FOOD_IMAGE }} style={styles.foodImage} />
         <Text style={styles.foodName} numberOfLines={1}>
           {recipe.name}
         </Text>
