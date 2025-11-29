@@ -1,4 +1,5 @@
 import { DEFAULT_FOOD_IMAGE } from "../constants/images";
+import { BARCODE_LIBRARY_GROUP } from "../constants/barcode";
 import { supabase } from "../lib/supabaseClient";
 import type { ServingFromDB } from "../types/food";
 
@@ -88,14 +89,29 @@ export const lookupBarcode = async (rawBarcode: string): Promise<BarcodeLookupRe
 const fetchFoodFromSupabase = async (
   barcode: string,
 ): Promise<{ food: SupabaseFoodRow; servings: ServingFromDB[] } | null> => {
-  const { data: food, error } = await supabase
-    .from("foods")
-    .select("id,name,best_by,location,barcode,cost,group_id,group_name,image_url")
-    .eq("barcode", barcode)
-    .maybeSingle();
+  const buildQuery = () =>
+    supabase
+      .from("foods")
+      .select("id,name,best_by,location,barcode,cost,group_id,group_name,image_url")
+      .eq("barcode", barcode)
+      .order("inserted_at", { ascending: false })
+      .limit(1);
 
-  if (error) {
-    throw error;
+  const tryFetch = async (libraryOnly: boolean) => {
+    let query = buildQuery();
+    if (libraryOnly) {
+      query = query.is("group_id", null).eq("group_name", BARCODE_LIBRARY_GROUP);
+    }
+    const { data, error } = await query.maybeSingle();
+    if (error) {
+      throw error;
+    }
+    return data ?? null;
+  };
+
+  let food = await tryFetch(true);
+  if (!food) {
+    food = await tryFetch(false);
   }
   if (!food) {
     return null;

@@ -16,6 +16,7 @@ import {
 import { useCameraPermissions } from "expo-camera";
 import type { BarcodeScanningResult, CameraViewProps } from "expo-camera";
 import { DEFAULT_FOOD_IMAGE } from "../constants/images";
+import { BARCODE_LIBRARY_GROUP } from "../constants/barcode";
 import { lookupBarcode, type BarcodeLookupResult } from "../features/barcodeLookup";
 import { supabase } from "../lib/supabaseClient";
 import type {
@@ -25,6 +26,9 @@ import type {
   ServingFromDB,
   ServingInput,
 } from "../types/food";
+
+const FOOD_IMAGE_BUCKET = "food-photos";
+const FOOD_IMAGE_FOLDER = "items";
 
 const NUTRIENT_ROWS: { key: NutrientKeys; label: string; unit: string }[] = [
   { key: "energy_kcal", label: "Energy", unit: "kcal" },
@@ -92,8 +96,11 @@ export const FoodEntryModal = ({
   const [isLookupLoading, setIsLookupLoading] = useState(false);
   const scannerLockRef = useRef(false);
   const cameraModuleRef = useRef<typeof import("expo-camera") | null>(null);
+  const imagePickerModuleRef = useRef<typeof import("expo-image-picker") | null>(null);
   const [scannerComponent, setScannerComponent] = useState<ComponentType<CameraViewProps> | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
+  const [photoUploadStatus, setPhotoUploadStatus] = useState<"idle" | "uploading" | "done">("idle");
+  const [barcodeTemplateId, setBarcodeTemplateId] = useState<string | null>(null);
 
   const canAdd = useMemo(() => name.trim().length > 0 && servings.length > 0, [name, servings.length]);
 
@@ -109,6 +116,8 @@ export const FoodEntryModal = ({
     setSaving(false);
     setIsScannerVisible(false);
     setScannerComponent(null);
+    setPhotoUploadStatus("idle");
+    setBarcodeTemplateId(null);
     scannerLockRef.current = false;
   };
 
@@ -162,6 +171,52 @@ export const FoodEntryModal = ({
     }
   };
 
+  const ensureImagePickerModule = async () => {
+    if (imagePickerModuleRef.current) {
+      return imagePickerModuleRef.current;
+    }
+    try {
+      const module = await import("expo-image-picker");
+      imagePickerModuleRef.current = module;
+      return module;
+    } catch (error) {
+      console.warn("Image picker module unavailable:", error);
+      return null;
+    }
+  };
+
+  const uploadPhotoToStorage = async (asset: { uri: string; fileName?: string; mimeType?: string }) => {
+    const response = await fetch(asset.uri);
+    const arrayBuffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+
+    const inferredType =
+      asset.mimeType || response.headers.get("content-type") || "image/jpeg";
+
+    const extension = (asset.fileName?.split(".").pop() ?? inferredType.split("/").pop() ?? "jpg")
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+
+    const safeBarcode = (barcode || `item-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, "");
+    const path = `${FOOD_IMAGE_FOLDER}/${safeBarcode}-${Date.now()}.${extension}`;
+
+    const { error } = await supabase.storage.from(FOOD_IMAGE_BUCKET).upload(path, bytes, {
+      upsert: true,
+      contentType: inferredType,
+    });
+
+    if (error) {
+      console.warn("Photo upload error", error);
+      throw error;
+    }
+
+    const {
+      data: { publicUrl },
+    } = supabase.storage.from(FOOD_IMAGE_BUCKET).getPublicUrl(path);
+
+    return publicUrl;
+  };
+
   const handleScanPress = async () => {
     try {
       const module = await ensureCameraModule();
@@ -190,6 +245,75 @@ export const FoodEntryModal = ({
     } catch (error) {
       console.warn(error);
       Alert.alert("Scanner unavailable", "Unable to launch the camera scanner right now.");
+    }
+  };
+
+  const handleAddPhotoPress = () => {
+    Alert.alert("Add photo", "Provide a product photo for this barcode.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Take photo", onPress: () => launchPhotoPicker("camera") },
+      { text: "Choose from library", onPress: () => launchPhotoPicker("library") },
+    ]);
+  };
+
+  const launchPhotoPicker = async (mode: "camera" | "library") => {
+    try {
+      const module = await ensureImagePickerModule();
+      if (!module) {
+        Alert.alert("Unavailable", "Unable to load the image picker right now.");
+        return;
+      }
+      if (mode === "camera" && module.requestCameraPermissionsAsync) {
+        const permissionResult = await module.requestCameraPermissionsAsync();
+        if (!permissionResult.granted) {
+          Alert.alert("Camera access needed", "Enable camera access to capture a product photo.");
+          return;
+        }
+      }
+      if (mode === "library" && module.requestMediaLibraryPermissionsAsync) {
+        const permissionResult = await module.requestMediaLibraryPermissionsAsync();
+        if (!permissionResult.granted) {
+          Alert.alert("Photo library access needed", "Allow photo library access to choose a picture.");
+          return;
+        }
+      }
+      const picker =
+        mode === "camera" ? module.launchCameraAsync : module.launchImageLibraryAsync;
+      const pickerOptions: Record<string, any> = {
+        allowsEditing: true,
+        quality: 0.8,
+        aspect: [4, 3],
+      };
+      if (module.MediaType?.Image) {
+        pickerOptions.mediaTypes = [module.MediaType.Image];
+      }
+      const result = await picker(pickerOptions as any);
+      if (!result || result.canceled || !result.assets?.length) {
+        return;
+      }
+      const asset = result.assets[0];
+      if (!asset?.uri) {
+        return;
+      }
+      setPhotoUploadStatus("uploading");
+      try {
+        const uploadedUrl = await uploadPhotoToStorage({
+          uri: asset.uri,
+          fileName: asset.fileName,
+          mimeType: (asset as any).mimeType || (asset as any).type,
+        });
+        setImageUrl(uploadedUrl);
+        setPhotoUploadStatus("done");
+        Alert.alert("Photo added", "We'll reuse this photo for future scans.");
+      } catch (uploadError) {
+        console.warn("Photo upload failed", uploadError);
+        setPhotoUploadStatus("idle");
+        Alert.alert("Upload failed", "We couldn’t upload that photo. Please try again.");
+      }
+    } catch (error) {
+      console.warn("Photo picker error", error);
+      setPhotoUploadStatus("idle");
+      Alert.alert("Upload failed", "We couldn’t upload that photo. Please try again.");
     }
   };
 
@@ -231,6 +355,7 @@ export const FoodEntryModal = ({
       setBestBy(food.best_by ?? "");
       setLocation(food.location ?? "");
       setCost(food.cost !== null && food.cost !== undefined ? String(food.cost) : "");
+      setBarcodeTemplateId(food.id);
       if (dbServings.length) {
         setServings(dbServings.map(mapServingFromDBRow));
       }
@@ -239,6 +364,7 @@ export const FoodEntryModal = ({
     }
 
     if (result.source === "openfoodfacts") {
+      setBarcodeTemplateId(null);
       const serving = buildServingFromOpenFoodFacts(result.product);
       if (result.product.name) {
         setName(result.product.name);
@@ -250,6 +376,7 @@ export const FoodEntryModal = ({
       return;
     }
 
+    setBarcodeTemplateId(null);
     Alert.alert("No match found", "Enter the details manually and they will be saved for next time.");
   };
 
@@ -393,6 +520,99 @@ export const FoodEntryModal = ({
     }
   }, [visible, mode, foodToEdit, servingsToEdit]);
 
+  const syncBarcodeTemplate = async (
+    barcodeValue: string,
+    template: {
+      name: string;
+      imageUrl: string | null;
+      bestBy: string | null;
+      location: string | null;
+      cost: number | null;
+      servings: ServingInput[];
+    },
+  ) => {
+    try {
+      const { data: existing, error: existingError } = await supabase
+        .from("foods")
+        .select("id")
+        .eq("barcode", barcodeValue)
+        .eq("group_name", BARCODE_LIBRARY_GROUP)
+        .is("group_id", null)
+        .maybeSingle();
+
+      if (existingError) {
+        throw existingError;
+      }
+
+      let templateId = existing?.id ?? barcodeTemplateId;
+      const recordPayload = {
+        name: template.name.trim() || "Unnamed item",
+        barcode: barcodeValue,
+        image_url: template.imageUrl || DEFAULT_FOOD_IMAGE,
+        group_name: BARCODE_LIBRARY_GROUP,
+        group_id: null,
+        best_by: template.bestBy || null,
+        location: template.location || null,
+        cost: template.cost,
+      };
+
+      if (templateId) {
+        const { error: updateError } = await supabase
+          .from("foods")
+          .update(recordPayload)
+          .eq("id", templateId);
+        if (updateError) throw updateError;
+        await supabase.from("food_servings").delete().eq("food_id", templateId);
+      } else {
+        const { data: inserted, error: insertError } = await supabase
+          .from("foods")
+          .insert(recordPayload)
+          .select("id")
+          .single();
+        if (insertError) throw insertError;
+        templateId = inserted.id;
+      }
+
+      if (template.servings.length && templateId) {
+        const servingRows = template.servings.map((serving) => ({
+          food_id: templateId,
+          label: serving.label.trim() || "Serving",
+          amount: serving.amount.trim() ? Number(serving.amount) : null,
+          unit: serving.unit.trim() || null,
+          energy_kcal: serving.nutrients.energy_kcal.trim()
+            ? Number(serving.nutrients.energy_kcal)
+            : null,
+          protein_g: serving.nutrients.protein_g.trim()
+            ? Number(serving.nutrients.protein_g)
+            : null,
+          carbs_g: serving.nutrients.carbs_g.trim()
+            ? Number(serving.nutrients.carbs_g)
+            : null,
+          fat_g: serving.nutrients.fat_g.trim() ? Number(serving.nutrients.fat_g) : null,
+          sat_fat_g: serving.nutrients.sat_fat_g.trim()
+            ? Number(serving.nutrients.sat_fat_g)
+            : null,
+          trans_fat_g: serving.nutrients.trans_fat_g.trim()
+            ? Number(serving.nutrients.trans_fat_g)
+            : null,
+          fiber_g: serving.nutrients.fiber_g.trim()
+            ? Number(serving.nutrients.fiber_g)
+            : null,
+          sugar_g: serving.nutrients.sugar_g.trim()
+            ? Number(serving.nutrients.sugar_g)
+            : null,
+          sodium_mg: serving.nutrients.sodium_mg.trim()
+            ? Number(serving.nutrients.sodium_mg)
+            : null,
+        }));
+        await supabase.from("food_servings").insert(servingRows);
+      }
+      setBarcodeTemplateId(templateId ?? null);
+    } catch (error) {
+      console.warn("Failed to sync barcode template", error);
+    }
+  };
+
   const handleSave = async () => {
     if (!canAdd || saving) return;
     setSaving(true);
@@ -472,6 +692,18 @@ export const FoodEntryModal = ({
       const { error: servingError } = await supabase.from("food_servings").insert(payload);
       if (servingError) throw servingError;
 
+      const trimmedBarcode = barcode.trim();
+      if (trimmedBarcode) {
+        await syncBarcodeTemplate(trimmedBarcode, {
+          name: payloadBase.name,
+          imageUrl: imageUrl,
+          bestBy: payloadBase.best_by,
+          location: payloadBase.location,
+          cost: costNumber,
+          servings,
+        });
+      }
+
       resetState();
       await onSaved();
     } catch (error: any) {
@@ -495,14 +727,66 @@ export const FoodEntryModal = ({
           <ScrollView contentContainerStyle={styles.contentContainer}>
             <Text style={styles.title}>{mode === "edit" ? "Edit food" : "Add food"}</Text>
             <View style={styles.photoPreviewWrapper}>
-              <Image
-                source={{ uri: imageUrl || DEFAULT_FOOD_IMAGE }}
-                style={styles.photoPreview}
-                resizeMode="cover"
-              />
-              <Text style={styles.photoHint}>
-                This photo updates automatically when data is found for your barcode.
-              </Text>
+              {isScannerVisible ? (
+                <View style={styles.inlineScannerContainer}>
+                  {Scanner ? (
+                    <>
+                      <Scanner
+                        style={styles.cameraFill}
+                        facing="back"
+                        onBarcodeScanned={handleBarcodeScanned}
+                      />
+                      <View style={styles.inlineScannerOverlay} pointerEvents="none">
+                        <View style={styles.viewFinderFrame} />
+                        <Text style={styles.scannerText}>Align the barcode within the frame</Text>
+                      </View>
+                    </>
+                  ) : (
+                    <View style={styles.scannerUnavailable}>
+                      <Text style={styles.scannerText}>Scanner module missing in this build.</Text>
+                    </View>
+                  )}
+                  <TouchableOpacity
+                    style={styles.inlineScannerClose}
+                    onPress={() => {
+                      setIsScannerVisible(false);
+                      setScannerComponent(null);
+                      scannerLockRef.current = false;
+                    }}
+                  >
+                    <Text style={styles.inlineScannerCloseText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <>
+                  <Image
+                    source={{ uri: imageUrl || DEFAULT_FOOD_IMAGE }}
+                    style={styles.photoPreview}
+                    resizeMode="cover"
+                  />
+                  <Text style={styles.photoHint}>
+                    {imageUrl === DEFAULT_FOOD_IMAGE
+                      ? "No photo was found for this barcode. Add one so future scans use it."
+                      : "This photo updates automatically when data is found for your barcode."}
+                  </Text>
+                  <TouchableOpacity
+                    style={[
+                      styles.photoActionButton,
+                      photoUploadStatus === "uploading" && styles.photoActionButtonDisabled,
+                    ]}
+                    onPress={handleAddPhotoPress}
+                    disabled={photoUploadStatus === "uploading"}
+                  >
+                    {photoUploadStatus === "uploading" ? (
+                      <ActivityIndicator size="small" color="#050505" />
+                    ) : (
+                      <Text style={styles.photoActionText}>
+                        {imageUrl && imageUrl !== DEFAULT_FOOD_IMAGE ? "Change photo" : "Add photo"}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                </>
+              )}
             </View>
 
             {/* Basic info */}
@@ -680,34 +964,6 @@ export const FoodEntryModal = ({
         </View>
       </KeyboardAvoidingView>
     </Modal>
-    <Modal visible={isScannerVisible} animationType="fade" presentationStyle="fullScreen">
-      <View style={styles.scannerContainer}>
-        {Scanner ? (
-          <Scanner
-            style={styles.cameraPreview}
-            facing="back"
-            onBarcodeScanned={handleBarcodeScanned}
-          />
-        ) : (
-          <View style={styles.scannerUnavailable}>
-            <Text style={styles.scannerText}>Scanner module missing in this build.</Text>
-          </View>
-        )}
-        <View style={styles.scannerOverlay}>
-          <Text style={styles.scannerText}>Align the barcode within the frame</Text>
-          <TouchableOpacity
-            style={styles.scannerCloseButton}
-            onPress={() => {
-              setIsScannerVisible(false);
-              setScannerComponent(null);
-              scannerLockRef.current = false;
-            }}
-          >
-            <Text style={styles.scannerCloseText}>Cancel</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
   </>
   );
 };
@@ -753,9 +1009,64 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: "#04070f",
   },
+  inlineScannerContainer: {
+    width: "100%",
+    height: 150,
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: "#000",
+    justifyContent: "flex-end",
+  },
+  cameraFill: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  inlineScannerOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 12,
+  },
+  viewFinderFrame: {
+    width: "80%",
+    height: "65%",
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.6)",
+  },
+  inlineScannerClose: {
+    position: "absolute",
+    bottom: 10,
+    alignSelf: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "rgba(0,0,0,0.65)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.6)",
+  },
+  inlineScannerCloseText: {
+    color: "#ffffff",
+    fontWeight: "700",
+  },
   photoHint: {
     fontSize: 11,
     color: "rgba(255,255,255,0.6)",
+  },
+  photoActionButton: {
+    marginTop: 6,
+    borderRadius: 999,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    alignSelf: "flex-start",
+    backgroundColor: "#0fb06a",
+  },
+  photoActionButtonDisabled: {
+    opacity: 0.6,
+  },
+  photoActionText: {
+    color: "#050505",
+    fontWeight: "700",
+    fontSize: 13,
   },
   section: {
     borderRadius: 20,
@@ -964,38 +1275,10 @@ const styles = StyleSheet.create({
     color: "#f97373",
     fontSize: 13,
   },
-  scannerContainer: {
-    flex: 1,
-    backgroundColor: "#000",
-    justifyContent: "flex-end",
-  },
-  scannerOverlay: {
-    paddingBottom: 40,
-    paddingHorizontal: 24,
-    alignItems: "center",
-    gap: 16,
-  },
-  cameraPreview: {
-    flex: 1,
-    alignSelf: "stretch",
-  },
   scannerText: {
     color: "#ffffff",
     fontSize: 16,
     textAlign: "center",
-  },
-  scannerCloseButton: {
-    paddingHorizontal: 32,
-    paddingVertical: 12,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.4)",
-    backgroundColor: "rgba(0,0,0,0.6)",
-  },
-  scannerCloseText: {
-    color: "#ffffff",
-    fontSize: 16,
-    fontWeight: "700",
   },
   scannerUnavailable: {
     ...StyleSheet.absoluteFillObject,

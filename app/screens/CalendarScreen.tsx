@@ -11,31 +11,6 @@ import {
 
 type RangeOption = "1d" | "5d" | "7d" | "14d" | "Month";
 
-type Meal = {
-  id: string;
-  time: string;
-  name: string;
-  calories: number;
-};
-
-type Task = {
-  id: string;
-  title: string;
-  done: boolean;
-};
-
-type DaySnapshot = {
-  date: string; // ISO
-  calories: number;
-  macros: {
-    protein: number;
-    carbs: number;
-    fat: number;
-  };
-  meals: Meal[];
-  tasks: Task[];
-};
-
 const RANGE_OPTIONS: RangeOption[] = ["1d", "5d", "7d", "14d", "Month"];
 
 const formatDate = (date: Date) =>
@@ -43,147 +18,91 @@ const formatDate = (date: Date) =>
 
 const toISODate = (date: Date) => date.toISOString().split("T")[0];
 
-const generateMockData = (): DaySnapshot[] => {
+const RANGE_DAY_COUNT: Record<RangeOption, number> = {
+  "1d": 0,
+  "5d": 5,
+  "7d": 7,
+  "14d": 14,
+  Month: 0,
+};
+
+const getUpcomingDates = (count: number) => {
   const today = new Date();
-  return Array.from({ length: 21 }).map((_, index) => {
-    const date = new Date(today);
-    date.setDate(today.getDate() - index);
-    const mealsCount = 2 + (index % 3);
-    const tasksCount = 2 + (index % 4);
-    return {
-      date: toISODate(date),
-      calories: 1800 + index * 15,
-      macros: {
-        protein: 120 + index * 2,
-        carbs: 160 + index * 3,
-        fat: 60 + index,
-      },
-      meals: Array.from({ length: mealsCount }).map((__, mealIndex) => ({
-        id: `meal-${index}-${mealIndex}`,
-        time: `${8 + mealIndex * 3}:00`,
-        name: ["Breakfast", "Lunch", "Dinner", "Snack"][mealIndex % 4],
-        calories: 400 + mealIndex * 120,
-      })),
-      tasks: Array.from({ length: tasksCount }).map((__, taskIndex) => ({
-        id: `task-${index}-${taskIndex}`,
-        title: ["Prep veggies", "Shop proteins", "Wash containers", "Brew cold brew"][taskIndex % 4],
-        done: taskIndex % 2 === 0,
-      })),
-    };
+  return Array.from({ length: count }).map((_, index) => {
+    const nextDate = new Date(today);
+    nextDate.setDate(today.getDate() + index);
+    return nextDate;
   });
 };
 
-const dailySnapshots = generateMockData();
+const buildMonthCalendar = (reference: Date): (Date | null)[] => {
+  const startOfMonth = new Date(reference.getFullYear(), reference.getMonth(), 1);
+  const daysInMonth = new Date(reference.getFullYear(), reference.getMonth() + 1, 0).getDate();
+  const leadingEmpty = startOfMonth.getDay();
+  const cells: (Date | null)[] = [];
+  for (let i = 0; i < leadingEmpty; i += 1) {
+    cells.push(null);
+  }
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    cells.push(new Date(reference.getFullYear(), reference.getMonth(), day));
+  }
+  const trailingCells = (7 - (cells.length % 7)) % 7;
+  for (let i = 0; i < trailingCells; i += 1) {
+    cells.push(null);
+  }
+  return cells;
+};
+
+const chunkIntoWeeks = (cells: (Date | null)[]) => {
+  const weeks: (Date | null)[][] = [];
+  for (let i = 0; i < cells.length; i += 7) {
+    weeks.push(cells.slice(i, i + 7));
+  }
+  return weeks;
+};
 
 export const CalendarScreen = () => {
   const [range, setRange] = useState<RangeOption>("1d");
-  const today = toISODate(new Date());
-  const todayData = useMemo(() => dailySnapshots.find((snapshot) => snapshot.date === today) ?? dailySnapshots[0], [today]);
-  const multiDayData = useMemo(() => {
-    switch (range) {
-      case "5d":
-        return dailySnapshots.slice(0, 5).reverse();
-      case "7d":
-        return dailySnapshots.slice(0, 7).reverse();
-      case "14d":
-        return dailySnapshots.slice(0, 14).reverse();
-      default:
-        return [];
-    }
-  }, [range]);
-
-  const [selectedMonthDay, setSelectedMonthDay] = useState<number | null>(null);
-
+  const [selectedMonthDate, setSelectedMonthDate] = useState<Date | null>(null);
   const now = new Date();
-  const monthDays = useMemo(() => {
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-    const daysInMonth = endOfMonth.getDate();
-    const leadingEmpty = startOfMonth.getDay();
-    const totalCells = Math.ceil((leadingEmpty + daysInMonth) / 7) * 7;
-    return Array.from({ length: totalCells }).map((_, index) => {
-      const day = index - leadingEmpty + 1;
-      if (day < 1 || day > daysInMonth) {
-        return null;
-      }
-      return day;
-    });
-  }, [now]);
-
-  const selectedDayData = useMemo(() => {
-    if (!selectedMonthDay) return null;
-    const selectedDate = toISODate(new Date(now.getFullYear(), now.getMonth(), selectedMonthDay));
-    return dailySnapshots.find((snapshot) => snapshot.date === selectedDate);
-  }, [selectedMonthDay, now]);
-
-  const renderMealRow = (meal: Meal) => (
-    <View key={meal.id} style={styles.mealRow}>
-      <View>
-        <Text style={styles.mealName}>{meal.name}</Text>
-        <Text style={styles.mealMeta}>
-          {meal.time} • {meal.calories} cal
-        </Text>
-      </View>
-    </View>
-  );
-
-  const renderTaskRow = (task: Task) => (
-    <View key={task.id} style={styles.taskRow}>
-      <View style={[styles.checkbox, task.done && styles.checkboxChecked]}>
-        {task.done ? <Text style={styles.checkboxIcon}>✓</Text> : null}
-      </View>
-      <Text style={[styles.taskText, task.done && styles.taskDone]}>{task.title}</Text>
-    </View>
-  );
-
+  const monthCells = buildMonthCalendar(now);
+  const monthWeeks = useMemo(() => chunkIntoWeeks(monthCells), [monthCells]);
+  const multiDayData = useMemo(() => {
+    const count = RANGE_DAY_COUNT[range];
+    if (!count) return [];
+    return getUpcomingDates(count);
+  }, [range]);
   const renderTodayView = () => (
     <>
       <View style={styles.section}>
         <Text style={styles.sectionHeading}>Today’s Eating</Text>
-        <Text style={styles.sectionSubheading}>Total {todayData.calories} cal • P {todayData.macros.protein}g • C {todayData.macros.carbs}g • F {todayData.macros.fat}g</Text>
-        {todayData.meals.map(renderMealRow)}
+        <Text style={styles.sectionSubheading}>No meal data yet</Text>
       </View>
       <View style={styles.section}>
         <Text style={styles.sectionHeading}>Today’s Tasks</Text>
         <Text style={styles.sectionSubheading}>Meal prep, cleaning, shopping, and more</Text>
-        {todayData.tasks.map(renderTaskRow)}
+        <Text style={[styles.taskText, styles.taskDone]}>No tasks logged yet</Text>
       </View>
     </>
   );
 
-  const renderMultiDayCard = ({ item }: { item: DaySnapshot }) => {
-    const dateObj = new Date(item.date);
+  const renderMultiDayCard = ({ item }: { item: Date }) => {
+    const dateObj = item;
     return (
       <View style={styles.dayCard}>
         <Text style={styles.dayCardDate}>{formatDate(dateObj)}</Text>
-        <Text style={styles.dayCardSummary}>
-          {item.meals.length} meals · {item.tasks.length} tasks
-        </Text>
+        <Text style={styles.dayCardSummary}>No entries yet</Text>
         <View style={styles.dayCardDivider} />
         <View>
           <Text style={styles.cardSectionLabel}>Meals</Text>
-          {item.meals.slice(0, 3).map((meal) => (
-            <Text key={meal.id} style={styles.cardListItem}>
-              {meal.name} · {meal.time}
-            </Text>
-          ))}
+          <Text style={styles.cardListItem}>No meals recorded yet</Text>
         </View>
         <View style={{ marginTop: 12 }}>
           <Text style={styles.cardSectionLabel}>Tasks</Text>
-          {item.tasks.slice(0, 3).map((task) => (
-            <Text key={task.id} style={styles.cardListItem}>
-              {task.title}
-            </Text>
-          ))}
+          <Text style={styles.cardListItem}>No tasks recorded yet</Text>
         </View>
       </View>
     );
-  };
-
-  const dayHasData = (day: number | null) => {
-    if (!day) return false;
-    const iso = toISODate(new Date(now.getFullYear(), now.getMonth(), day));
-    return dailySnapshots.some((snapshot) => snapshot.date === iso);
   };
 
   const renderMonthView = () => (
@@ -201,49 +120,35 @@ export const CalendarScreen = () => {
         ))}
       </View>
       <View style={styles.grid}>
-        {monthDays.map((day, index) => {
-          const isSelected = day && selectedMonthDay === day;
-          return (
-            <TouchableOpacity
-              key={`${day ?? "empty"}-${index}`}
-              style={[
-                styles.gridCell,
-                day ? styles.gridCellActive : styles.gridCellEmpty,
-                isSelected && styles.gridCellSelected,
-              ]}
-              activeOpacity={0.8}
-              disabled={!day}
-              onPress={() => setSelectedMonthDay(day ?? null)}
-            >
-              {day ? <Text style={styles.gridCellText}>{day}</Text> : null}
-              {dayHasData(day) ? <View style={styles.gridDot} /> : null}
-            </TouchableOpacity>
-          );
-        })}
+        {monthWeeks.map((week, weekIndex) => (
+          <View key={`week-${weekIndex}`} style={styles.weekRow}>
+            {week.map((cell, cellIndex) => {
+              const isSelected =
+                cell && selectedMonthDate && cell.toDateString() === selectedMonthDate.toDateString();
+              return (
+                <TouchableOpacity
+                  key={`${cell ? cell.getDate() : "empty"}-${weekIndex}-${cellIndex}`}
+                  style={[
+                    styles.gridCell,
+                    cell ? styles.gridCellActive : styles.gridCellEmpty,
+                    isSelected && styles.gridCellSelected,
+                  ]}
+                  activeOpacity={0.8}
+                  disabled={!cell}
+                  onPress={() => setSelectedMonthDate(cell)}
+                >
+                  {cell ? <Text style={styles.gridCellText}>{cell.getDate()}</Text> : null}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        ))}
       </View>
 
-      {selectedMonthDay && selectedDayData ? (
+      {selectedMonthDate ? (
         <View style={[styles.section, styles.monthDetail]}>
-          <Text style={styles.sectionHeading}>{formatDate(new Date(selectedDayData.date))}</Text>
-          <Text style={styles.sectionSubheading}>
-            {selectedDayData.meals.length} meals · {selectedDayData.tasks.length} tasks
-          </Text>
-          <View style={{ marginTop: 12 }}>
-            <Text style={styles.cardSectionLabel}>Meals</Text>
-            {selectedDayData.meals.map((meal) => (
-              <Text key={meal.id} style={styles.cardListItem}>
-                {meal.name} · {meal.time}
-              </Text>
-            ))}
-          </View>
-          <View style={{ marginTop: 12 }}>
-            <Text style={styles.cardSectionLabel}>Tasks</Text>
-            {selectedDayData.tasks.map((task) => (
-              <Text key={task.id} style={styles.cardListItem}>
-                {task.title}
-              </Text>
-            ))}
-          </View>
+          <Text style={styles.sectionHeading}>{formatDate(selectedMonthDate)}</Text>
+          <Text style={styles.sectionSubheading}>No entries logged for this day yet.</Text>
         </View>
       ) : null}
     </View>
@@ -279,7 +184,7 @@ export const CalendarScreen = () => {
         ) : (
           <FlatList
             data={multiDayData}
-            keyExtractor={(item) => item.date}
+            keyExtractor={(item) => toISODate(item)}
             renderItem={renderMultiDayCard}
             scrollEnabled={false}
             contentContainerStyle={{ gap: 16 }}
@@ -456,12 +361,14 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   grid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
     rowGap: 12,
   },
+  weekRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
   gridCell: {
-    width: `${100 / 7}%`,
+    flex: 1,
     alignItems: "center",
     paddingVertical: 12,
     position: "relative",
