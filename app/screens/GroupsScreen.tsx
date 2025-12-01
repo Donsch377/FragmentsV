@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Modal,
   ScrollView,
   StyleSheet,
@@ -16,6 +17,7 @@ import { Group } from "../types/groups";
 import type { GroupsStackParamList } from "../navigation/GroupsStack";
 import { supabase } from "../lib/supabaseClient";
 import { useAuth } from "../providers/AuthProvider";
+import { ensureSoloGroup } from "../utils/groups";
 
 type NavigationProp = NativeStackNavigationProp<GroupsStackParamList, "GroupsList">;
 
@@ -40,17 +42,23 @@ export const GroupsScreen = () => {
   const mapRowToGroup = (row: any): Group => {
     const role: Group["role"] =
       row.owner_id && row.owner_id === session?.user?.id ? "Owner" : "Member";
+    const hasStats =
+      typeof row.member_count === "number" ||
+      typeof row.recipe_count === "number" ||
+      typeof row.inventory_count === "number";
     return {
       id: row.id,
       name: row.name,
       role,
       description: row.description ?? undefined,
       code: row.invite_code ?? "",
-      stats: {
-        members: row.member_count ?? 1,
-        recipes: row.recipe_count ?? 0,
-        inventory: row.inventory_count ?? 0,
-      },
+      stats: hasStats
+        ? {
+            members: row.member_count ?? 0,
+            recipes: row.recipe_count ?? 0,
+            inventory: row.inventory_count ?? 0,
+          }
+        : undefined,
       lastActivity: row.last_activity ?? undefined,
     };
   };
@@ -59,6 +67,9 @@ export const GroupsScreen = () => {
     const loadGroups = async () => {
       setLoading(true);
       try {
+        if (session?.user?.id) {
+          await ensureSoloGroup(session.user.id);
+        }
         const { data, error } = await supabase
           .from("groups")
           .select("*")
@@ -113,6 +124,13 @@ export const GroupsScreen = () => {
         .select()
         .single();
       if (error) throw error;
+      if (session?.user?.id) {
+        await supabase.from("group_members").upsert({
+          group_id: data.id,
+          user_id: session.user.id,
+          role: "Owner",
+        });
+      }
       setGroups((prev) => [mapRowToGroup(data), ...prev]);
     } catch (error) {
       console.error(error);
@@ -123,35 +141,33 @@ export const GroupsScreen = () => {
   };
 
   const handleJoin = async () => {
-    if (!joinCode.trim()) {
+    const code = joinCode.trim().toUpperCase();
+    if (!code) {
+      return;
+    }
+    if (!session?.user?.id) {
+      Alert.alert("Sign in required", "Log in before joining a group.");
       return;
     }
 
-    const code = joinCode.trim().toUpperCase();
     try {
-      const { data, error } = await supabase
-        .from("groups")
-        .select("*")
-        .eq("invite_code", code)
-        .maybeSingle();
+      const { data, error } = await supabase.rpc("join_group_by_code", {
+        invite_code: code,
+      });
       if (error) throw error;
       if (!data) {
+        Alert.alert("Code not found", "Double-check the invite code and try again.");
         return;
-      }
-      if (session?.user?.id) {
-        await supabase.from("group_members").insert({
-          group_id: data.id,
-          user_id: session.user.id,
-          role: "Member",
-        });
       }
       setGroups((prev) => {
         const exists = prev.some((g) => g.id === data.id);
         if (exists) return prev;
         return [mapRowToGroup(data), ...prev];
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
+      Alert.alert("Unable to join group", error.message ?? "Please try again.");
+      return;
     }
 
     setJoinModalVisible(false);
@@ -160,7 +176,7 @@ export const GroupsScreen = () => {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["left", "right", "bottom"]}>
-      <ScrollView contentContainerStyle={styles.contentContainer}>
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.contentContainer}>
         <View style={styles.header}>
           <Text style={styles.heading}>Your Groups</Text>
           <Text style={styles.subheading}>Personal shelves plus shared crews all in one feed.</Text>
@@ -193,10 +209,12 @@ export const GroupsScreen = () => {
                 {group.description ? (
                   <Text style={styles.groupDescription}>{group.description}</Text>
                 ) : null}
-                <Text style={styles.groupMeta}>
-                  {group.stats.members} members • {group.stats.recipes} recipes •{" "}
-                  {group.stats.inventory} items
-                </Text>
+                {group.stats ? (
+                  <Text style={styles.groupMeta}>
+                    {group.stats.members} members • {group.stats.recipes} recipes •{" "}
+                    {group.stats.inventory} items
+                  </Text>
+                ) : null}
                 {group.lastActivity ? (
                   <Text style={styles.groupActivity}>Last activity: {group.lastActivity}</Text>
                 ) : null}
@@ -219,7 +237,14 @@ export const GroupsScreen = () => {
         </View>
       </ScrollView>
 
-      <Modal visible={isCreateModalVisible} animationType="slide" transparent onRequestClose={() => setCreateModalVisible(false)}>
+      <Modal
+        visible={isCreateModalVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setCreateModalVisible(false)}
+        presentationStyle="overFullScreen"
+        statusBarTranslucent
+      >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Create Group</Text>
@@ -248,7 +273,14 @@ export const GroupsScreen = () => {
         </View>
       </Modal>
 
-      <Modal visible={isJoinModalVisible} animationType="slide" transparent onRequestClose={() => setJoinModalVisible(false)}>
+      <Modal
+        visible={isJoinModalVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setJoinModalVisible(false)}
+        presentationStyle="overFullScreen"
+        statusBarTranslucent
+      >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Join Group</Text>

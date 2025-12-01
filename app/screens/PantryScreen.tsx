@@ -15,15 +15,18 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { RouteProp, useNavigation, useRoute } from "@react-navigation/native";
 import { supabase } from "../lib/supabaseClient";
 import { FoodEntryModal } from "../components/FoodEntryModal";
 import type { EditableFood, ServingFromDB } from "../types/food";
 import { DEFAULT_FOOD_IMAGE } from "../constants/images";
+import { useAuth } from "../providers/AuthProvider";
+import { fetchAccessibleGroups } from "../utils/groups";
 
 const PANTRY_TAB_OPTIONS = ["Foods", "Recipes"] as const;
 type PantryTab = (typeof PANTRY_TAB_OPTIONS)[number];
 
-const DEFAULT_GROUP_NAMES: string[] = [];
+type PantryGroupOption = { id: string; name: string };
 
 const NUTRIENT_DISPLAY = [
   { key: "energy_kcal", label: "Energy", unit: "kcal" },
@@ -50,6 +53,8 @@ type Food = {
   location?: string | null;
   barcode?: string | null;
   cost?: number | null;
+  link_id?: string;
+  catalog_id?: string | null;
 };
 
 const formatDate = (value?: string | null) => {
@@ -72,12 +77,19 @@ type Recipe = {
   prep_time: string | null;
   servings: string | null;
   instructions?: string | null;
+  group_id?: string | null;
+  link_id?: string;
 };
 
+type PantryRoute = RouteProp<{ Pantry: { groupId?: string | null } }, "Pantry">;
+
 export const PantryScreen = () => {
+  const navigation = useNavigation<any>();
+  const route = useRoute<PantryRoute>();
+  const { session } = useAuth();
   const [activeTab, setActiveTab] = useState<PantryTab>("Foods");
-  const [groupOptions, setGroupOptions] = useState<string[]>(Array.from(DEFAULT_GROUP_NAMES));
-  const [selectedGroup, setSelectedGroup] = useState<string>("");
+  const [groupOptions, setGroupOptions] = useState<PantryGroupOption[]>([]);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [foods, setFoods] = useState<Food[]>([]);
   const [isFetchingFoods, setIsFetchingFoods] = useState(false);
   const [showGroupMenu, setShowGroupMenu] = useState(false);
@@ -112,8 +124,22 @@ export const PantryScreen = () => {
   } | null>(null);
   const restoreDetailAfterModalRef = useRef(false);
 
+  const selectedGroupName = useMemo(() => {
+    const match = groupOptions.find((option) => option.id === selectedGroupId);
+    return match?.name ?? "";
+  }, [groupOptions, selectedGroupId]);
+
+  const structuredActiveRecipe = useMemo(() => {
+    if (!activeRecipe?.instructions) return null;
+    try {
+      return JSON.parse(activeRecipe.instructions);
+    } catch {
+      return null;
+    }
+  }, [activeRecipe?.instructions]);
+
   const loadFoods = async () => {
-    if (!selectedGroup) {
+    if (!selectedGroupId) {
       setFoods([]);
       setIsFetchingFoods(false);
       return [];
@@ -121,13 +147,23 @@ export const PantryScreen = () => {
     setIsFetchingFoods(true);
     try {
       const { data, error } = await supabase
-        .from("foods")
-        .select("*")
-        .eq("group_name", selectedGroup)
+        .from("group_foods")
+        .select("id, food:foods(*)")
+        .eq("group_id", selectedGroupId)
         .order("inserted_at", { ascending: false });
-
       if (error) throw error;
-      const result = data ?? [];
+      const result =
+        data
+          ?.map((row: any) => {
+            if (!row.food) return null;
+            return {
+              ...row.food,
+              group_id: row.food.group_id ?? selectedGroupId,
+              group_name: row.food.group_name ?? selectedGroupName,
+              link_id: row.id,
+            } as Food;
+          })
+          .filter((food: Food | null): food is Food => Boolean(food)) ?? [];
       setFoods(result);
       return result;
     } catch (error) {
@@ -140,29 +176,48 @@ export const PantryScreen = () => {
 
   useEffect(() => {
     loadFoods();
-  }, [selectedGroup]);
+  }, [selectedGroupId]);
+
+  const loadRecipes = async () => {
+    if (!selectedGroupId) {
+      setRecipes([]);
+      setIsFetchingRecipes(false);
+      return;
+    }
+    setIsFetchingRecipes(true);
+    try {
+      const { data, error } = await supabase
+        .from("group_recipes")
+        .select("id, recipe:recipes(*)")
+        .eq("group_id", selectedGroupId)
+        .order("inserted_at", { ascending: false });
+      if (error) throw error;
+      const mapped =
+        data
+          ?.map((row: any) => {
+            if (!row.recipe) return null;
+            return {
+              ...row.recipe,
+              group_id: row.recipe.group_id ?? selectedGroupId,
+              link_id: row.id,
+            } as Recipe;
+          })
+          .filter((recipe: Recipe | null): recipe is Recipe => Boolean(recipe)) ?? [];
+      setRecipes(mapped);
+    } catch (error) {
+      console.error(error);
+      setRecipes([]);
+    } finally {
+      setIsFetchingRecipes(false);
+    }
+  };
 
   useEffect(() => {
-    const loadRecipes = async () => {
-      setIsFetchingRecipes(true);
-      try {
-        const { data, error } = await supabase
-          .from("recipes")
-          .select("*")
-          .order("inserted_at", { ascending: false });
-        if (error) throw error;
-        setRecipes(data ?? []);
-      } catch (error) {
-        console.error(error);
-      } finally {
-        setIsFetchingRecipes(false);
-      }
-    };
     loadRecipes();
-  }, []);
+  }, [selectedGroupId]);
 
   const openCreateModal = () => {
-    if (!selectedGroup) {
+    if (!selectedGroupId) {
       Alert.alert("Select a group", "Create or choose a group before adding foods.");
       return;
     }
@@ -172,30 +227,28 @@ export const PantryScreen = () => {
     setShowFoodModal(true);
   };
 
+  const openRecipeComposer = () => {
+    if (!selectedGroupId) {
+      Alert.alert("Select a group", "Choose a group before creating a recipe.");
+      return;
+    }
+    const rootNav = navigation.getParent();
+    rootNav?.navigate("RecipeCreator", { groupId: selectedGroupId });
+  };
+
   useEffect(() => {
+    if (!session?.user?.id) return;
     const loadGroups = async () => {
-      try {
-        const { data, error } = await supabase
-          .from("groups")
-          .select("name")
-          .order("created_at", { ascending: true });
-        if (error) throw error;
-        const names = (data ?? []).map((g) => g.name as string);
-        setGroupOptions(names);
-        if (names.length && !names.includes(selectedGroup)) {
-          setSelectedGroup(names[0]);
-        }
-        if (!names.length) {
-          setSelectedGroup("");
-        }
-      } catch (error) {
-        console.error(error);
-        setGroupOptions([]);
-        setSelectedGroup("");
-      }
+      const options = await fetchAccessibleGroups(session.user?.id);
+      setGroupOptions(options);
+      setSelectedGroupId((prev) => {
+        if (route?.params?.groupId) return route.params.groupId;
+        if (prev && options.some((option) => option.id === prev)) return prev;
+        return options[0]?.id ?? null;
+      });
     };
     loadGroups();
-  }, []);
+  }, [session?.user?.id, route?.params?.groupId]);
 
   const handleDeleteFood = (food: Food) => {
     Alert.alert(
@@ -208,8 +261,24 @@ export const PantryScreen = () => {
           style: "destructive",
           onPress: async () => {
             try {
-              const { error } = await supabase.from("foods").delete().eq("id", food.id);
-              if (error) throw error;
+              if (!selectedGroupId) throw new Error("Select a group before deleting.");
+              if (food.link_id) {
+                await supabase.from("group_foods").delete().eq("id", food.link_id);
+              } else {
+                await supabase
+                  .from("group_foods")
+                  .delete()
+                  .eq("group_id", selectedGroupId)
+                  .eq("food_id", food.id);
+              }
+              const { count, error: countError } = await supabase
+                .from("group_foods")
+                .select("id", { count: "exact", head: true })
+                .eq("food_id", food.id);
+              if (countError) throw countError;
+              if (!count || count === 0) {
+                await supabase.from("foods").delete().eq("id", food.id);
+              }
               await loadFoods();
             } catch (error) {
               console.error(error);
@@ -504,16 +573,7 @@ export const PantryScreen = () => {
         });
       }}
     >
-      <ScrollView contentContainerStyle={styles.scrollContent}>
-        <View style={styles.heroCard}>
-          <Text style={styles.sectionLabel}>Pantry</Text>
-          <Text style={styles.heroTitle}>Personal &amp; group pantries in one feed</Text>
-          <Text style={styles.heroDescription}>
-            Everything lives inside exactly one pantry—your own shelf or a shared crew. Owner tags make it
-            obvious where “Banana (Personal)” or “Peanut Butter (Three Amigos)” belong.
-          </Text>
-        </View>
-
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
         <View style={styles.inventoryCard}>
           <View style={styles.inventoryHeader}>
           <Text style={styles.inventoryHeading}>Inventory view</Text>
@@ -523,7 +583,7 @@ export const PantryScreen = () => {
                 onPress={() => setShowGroupMenu((prev) => !prev)}
               >
                 <Text style={styles.groupSelectorText}>
-                  {selectedGroup || groupOptions[0]} pantry
+                  {selectedGroupName || groupOptions[0]?.name || "your"} pantry
                 </Text>
                 <Text style={styles.groupSelectorCaret}>{showGroupMenu ? "▲" : "▼"}</Text>
               </Pressable>
@@ -533,23 +593,23 @@ export const PantryScreen = () => {
             <View style={styles.groupDropdown}>
               {groupOptions.map((group) => (
                 <TouchableOpacity
-                  key={group}
+                  key={group.id}
                   style={[
                     styles.groupDropdownItem,
-                    selectedGroup === group && styles.groupDropdownItemActive,
+                    selectedGroupId === group.id && styles.groupDropdownItemActive,
                   ]}
                   onPress={() => {
-                    setSelectedGroup(group);
+                    setSelectedGroupId(group.id);
                     setShowGroupMenu(false);
                   }}
                 >
                   <Text
                     style={[
                       styles.groupDropdownLabel,
-                      selectedGroup === group && styles.groupDropdownLabelActive,
+                      selectedGroupId === group.id && styles.groupDropdownLabelActive,
                     ]}
                   >
-                    {group}
+                    {group.name}
                   </Text>
                 </TouchableOpacity>
               ))}
@@ -579,8 +639,17 @@ export const PantryScreen = () => {
         {activeTab === "Foods" ? (
           <View style={styles.gridCard}>
             <View style={styles.gridHeader}>
-              <Text style={styles.gridTitle}>Foods</Text>
-              <Text style={styles.gridSubtitle}>{foods.length} items</Text>
+              <View>
+                <Text style={styles.gridTitle}>Foods</Text>
+                <Text style={styles.gridSubtitle}>{foods.length} items</Text>
+              </View>
+              <TouchableOpacity
+                style={styles.createRecipeButton}
+                onPress={openCreateModal}
+                disabled={!selectedGroupId}
+              >
+                <Text style={styles.createRecipeButtonText}>Add food</Text>
+              </TouchableOpacity>
             </View>
             {isFetchingFoods ? (
               <View style={styles.loadingState}>
@@ -603,7 +672,8 @@ export const PantryScreen = () => {
               <View style={styles.emptyState}>
                 <Text style={styles.emptyTitle}>Nothing here yet</Text>
                 <Text style={styles.emptyBody}>
-                  Add an item below to start building the {selectedGroup} pantry.
+                  Add an item below to start building the{" "}
+                  {selectedGroupName || groupOptions[0]?.name || "your"} pantry.
                 </Text>
               </View>
             )}
@@ -611,8 +681,17 @@ export const PantryScreen = () => {
         ) : (
           <View style={styles.gridCard}>
             <View style={styles.gridHeader}>
-              <Text style={styles.gridTitle}>Recipes</Text>
-              <Text style={styles.gridSubtitle}>{recipes.length} saved</Text>
+              <View>
+                <Text style={styles.gridTitle}>Recipes</Text>
+                <Text style={styles.gridSubtitle}>{recipes.length} saved</Text>
+              </View>
+              <TouchableOpacity
+                style={styles.createRecipeButton}
+                onPress={openRecipeComposer}
+                disabled={!selectedGroupId}
+              >
+                <Text style={styles.createRecipeButtonText}>Create recipe</Text>
+              </TouchableOpacity>
             </View>
             {isFetchingRecipes ? (
               <View style={styles.loadingState}>
@@ -635,25 +714,14 @@ export const PantryScreen = () => {
               <View style={styles.emptyState}>
                 <Text style={styles.emptyTitle}>No recipes yet</Text>
                 <Text style={styles.emptyBody}>
-                  Add recipes via Supabase Studio or hook up a quick add here.
+                  Create a recipe above to start filling the{" "}
+                  {selectedGroupName || groupOptions[0]?.name || "selected"} group.
                 </Text>
               </View>
             )}
           </View>
         )}
 
-        <View style={styles.quickAddCard}>
-          <Text style={styles.quickAddTitle}>Manual food entry</Text>
-          <Text style={styles.quickAddSubtitle}>
-            Open a structured sheet to define servings and nutrients, then save to Supabase.
-          </Text>
-          <TouchableOpacity style={styles.primaryButton} onPress={openCreateModal} disabled={!selectedGroup}>
-            <Text style={styles.primaryButtonText}>Add food</Text>
-          </TouchableOpacity>
-          <Text style={styles.helperText}>
-            New entries will appear above in the {selectedGroup || "selected"} pantry once saved.
-          </Text>
-        </View>
       </ScrollView>
       {activeFood && activeLayout ? (
         <>
@@ -675,7 +743,7 @@ export const PantryScreen = () => {
           <Animated.View style={[styles.detailOverlay, animatedCardStyle]}>
             <ScrollView
               contentContainerStyle={[styles.detailSheet, { minHeight: finalHeight }]}
-              showsVerticalScrollIndicator={true}
+              showsVerticalScrollIndicator={false}
               bounces={false}
               contentInset={{ bottom: 48 }}
             >
@@ -857,10 +925,12 @@ export const PantryScreen = () => {
         onSaved={handleModalSaved}
         defaultGroupName={
           formMode === "edit"
-            ? foodToEdit?.group_name ?? null
-            : selectedGroup || (groupOptions[0] ?? null)
+            ? foodToEdit?.group_name ?? selectedGroupName ?? null
+            : selectedGroupName || groupOptions[0]?.name || null
         }
-        defaultGroupId={formMode === "edit" ? foodToEdit?.group_id ?? null : null}
+        defaultGroupId={
+          formMode === "edit" ? foodToEdit?.group_id ?? selectedGroupId ?? null : selectedGroupId
+        }
       />
 
       {activeRecipe && activeRecipeLayout ? (
@@ -974,10 +1044,28 @@ export const PantryScreen = () => {
                 </View>
                 <View style={styles.detailSection}>
                   <Text style={styles.sectionTitle}>Ingredients preview</Text>
-                  <Text style={styles.sectionBody}>
-                    - Citrus glaze, garlic, chili flakes {"\n"}- Roasted seasonal veggies {"\n"}- Fresh
-                    herbs for garnish
-                  </Text>
+                  {structuredActiveRecipe?.ingredients?.length ? (
+                    structuredActiveRecipe.ingredients.slice(0, 3).map((ingredient: any) => (
+                      <Text key={ingredient.id} style={styles.sectionBody}>
+                        • {ingredient.label || "Ingredient"}
+                        {ingredient.amount ? ` · ${ingredient.amount} ${ingredient.unit || ""}` : ""}
+                      </Text>
+                    ))
+                  ) : (
+                    <Text style={styles.sectionBody}>No ingredients yet.</Text>
+                  )}
+                </View>
+                <View style={styles.detailSection}>
+                  <Text style={styles.sectionTitle}>Steps preview</Text>
+                  {structuredActiveRecipe?.steps?.length ? (
+                    structuredActiveRecipe.steps.slice(0, 3).map((step: any, index: number) => (
+                      <Text key={step.id ?? index} style={styles.sectionBody}>
+                        {index + 1}. {step.summary || "Unnamed step"}
+                      </Text>
+                    ))
+                  ) : (
+                    <Text style={styles.sectionBody}>No steps added yet.</Text>
+                  )}
                 </View>
                 <View style={styles.actionRow}>
                   {["Cook now", "Schedule", "Share"].map((action) => (
@@ -1087,19 +1175,6 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     backgroundColor: "#060a13",
   },
-  heroCard: {
-    borderRadius: 24,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
-    backgroundColor: "#0c1424",
-    paddingHorizontal: 20,
-    paddingVertical: 24,
-    shadowColor: "#000",
-    shadowOpacity: 0.65,
-    shadowRadius: 30,
-    shadowOffset: { width: 0, height: 20 },
-    elevation: 12,
-  },
   sectionLabel: {
     color: "rgba(255,255,255,0.4)",
     fontSize: 12,
@@ -1107,20 +1182,8 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     textTransform: "uppercase",
   },
-  heroTitle: {
-    marginTop: 12,
-    fontSize: 32,
-    fontWeight: "600",
-    color: "#ffffff",
-  },
-  heroDescription: {
-    marginTop: 12,
-    fontSize: 16,
-    lineHeight: 22,
-    color: "rgba(255,255,255,0.7)",
-  },
   inventoryCard: {
-    marginTop: 24,
+    marginTop: 0,
     borderRadius: 24,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.1)",
@@ -1181,6 +1244,17 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 12,
+  },
+  createRecipeButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "#0fb06a",
+  },
+  createRecipeButtonText: {
+    color: "#050810",
+    fontWeight: "700",
+    fontSize: 13,
   },
   gridTitle: {
     fontSize: 20,
@@ -1253,38 +1327,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: "rgba(255,255,255,0.6)",
     textAlign: "center",
-  },
-  quickAddCard: {
-    marginTop: 24,
-    borderRadius: 28,
-    borderWidth: 1,
-    borderColor: "rgba(15,176,106,0.4)",
-    backgroundColor: "#0b161f",
-    padding: 20,
-    gap: 12,
-  },
-  quickAddTitle: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: "#ffffff",
-  },
-  quickAddSubtitle: {
-    fontSize: 14,
-    color: "rgba(255,255,255,0.65)",
-  },
-  primaryButton: {
-    borderRadius: 18,
-    backgroundColor: "#0fb06a",
-    paddingVertical: 14,
-    alignItems: "center",
-  },
-  primaryButtonDisabled: {
-    opacity: 0.7,
-  },
-  primaryButtonText: {
-    color: "#050505",
-    fontSize: 16,
-    fontWeight: "700",
   },
   helperText: {
     fontSize: 12,

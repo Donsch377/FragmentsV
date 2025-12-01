@@ -16,9 +16,11 @@ import {
 import { useCameraPermissions } from "expo-camera";
 import type { BarcodeScanningResult, CameraViewProps } from "expo-camera";
 import { DEFAULT_FOOD_IMAGE } from "../constants/images";
-import { BARCODE_LIBRARY_GROUP } from "../constants/barcode";
 import { lookupBarcode, type BarcodeLookupResult } from "../features/barcodeLookup";
 import { supabase } from "../lib/supabaseClient";
+import { useAuth } from "../providers/AuthProvider";
+import { ensureGroupMembership } from "../utils/groups";
+import { captureAuthDebugSnapshot, type AuthDebugSnapshot } from "../utils/authDebug";
 import type {
   EditableFood,
   NutrientKeys,
@@ -83,6 +85,7 @@ export const FoodEntryModal = ({
   foodToEdit,
   servingsToEdit = [],
 }: FoodEntryModalProps) => {
+  const { session } = useAuth();
   const [name, setName] = useState("");
   const [bestBy, setBestBy] = useState("");
   const [location, setLocation] = useState("");
@@ -100,7 +103,7 @@ export const FoodEntryModal = ({
   const [scannerComponent, setScannerComponent] = useState<ComponentType<CameraViewProps> | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [photoUploadStatus, setPhotoUploadStatus] = useState<"idle" | "uploading" | "done">("idle");
-  const [barcodeTemplateId, setBarcodeTemplateId] = useState<string | null>(null);
+  const [catalogId, setCatalogId] = useState<string | null>(null);
 
   const canAdd = useMemo(() => name.trim().length > 0 && servings.length > 0, [name, servings.length]);
 
@@ -117,7 +120,7 @@ export const FoodEntryModal = ({
     setIsScannerVisible(false);
     setScannerComponent(null);
     setPhotoUploadStatus("idle");
-    setBarcodeTemplateId(null);
+    setCatalogId(null);
     scannerLockRef.current = false;
   };
 
@@ -355,7 +358,7 @@ export const FoodEntryModal = ({
       setBestBy(food.best_by ?? "");
       setLocation(food.location ?? "");
       setCost(food.cost !== null && food.cost !== undefined ? String(food.cost) : "");
-      setBarcodeTemplateId(food.id);
+      setCatalogId(food.catalog_id ?? null);
       if (dbServings.length) {
         setServings(dbServings.map(mapServingFromDBRow));
       }
@@ -364,7 +367,7 @@ export const FoodEntryModal = ({
     }
 
     if (result.source === "openfoodfacts") {
-      setBarcodeTemplateId(null);
+      setCatalogId(null);
       const serving = buildServingFromOpenFoodFacts(result.product);
       if (result.product.name) {
         setName(result.product.name);
@@ -376,7 +379,7 @@ export const FoodEntryModal = ({
       return;
     }
 
-    setBarcodeTemplateId(null);
+    setCatalogId(null);
     Alert.alert("No match found", "Enter the details manually and they will be saved for next time.");
   };
 
@@ -510,6 +513,7 @@ export const FoodEntryModal = ({
           : "",
       );
       setImageUrl(foodToEdit.image_url ?? null);
+      setCatalogId(foodToEdit.catalog_id ?? null);
       if (servingsToEdit.length) {
         setServings(servingsToEdit.map(mapServingFromDBRow));
       } else {
@@ -533,39 +537,32 @@ export const FoodEntryModal = ({
   ) => {
     try {
       const { data: existing, error: existingError } = await supabase
-        .from("foods")
+        .from("food_catalog")
         .select("id")
         .eq("barcode", barcodeValue)
-        .eq("group_name", BARCODE_LIBRARY_GROUP)
-        .is("group_id", null)
         .maybeSingle();
 
-      if (existingError) {
+      if (existingError && existingError.code !== "PGRST116") {
         throw existingError;
       }
 
-      let templateId = existing?.id ?? barcodeTemplateId;
+      let templateId = existing?.id ?? catalogId;
       const recordPayload = {
         name: template.name.trim() || "Unnamed item",
         barcode: barcodeValue,
         image_url: template.imageUrl || DEFAULT_FOOD_IMAGE,
-        group_name: BARCODE_LIBRARY_GROUP,
-        group_id: null,
-        best_by: template.bestBy || null,
-        location: template.location || null,
-        cost: template.cost,
       };
 
       if (templateId) {
         const { error: updateError } = await supabase
-          .from("foods")
+          .from("food_catalog")
           .update(recordPayload)
           .eq("id", templateId);
         if (updateError) throw updateError;
-        await supabase.from("food_servings").delete().eq("food_id", templateId);
+        await supabase.from("food_catalog_servings").delete().eq("catalog_id", templateId);
       } else {
         const { data: inserted, error: insertError } = await supabase
-          .from("foods")
+          .from("food_catalog")
           .insert(recordPayload)
           .select("id")
           .single();
@@ -575,7 +572,7 @@ export const FoodEntryModal = ({
 
       if (template.servings.length && templateId) {
         const servingRows = template.servings.map((serving) => ({
-          food_id: templateId,
+          catalog_id: templateId,
           label: serving.label.trim() || "Serving",
           amount: serving.amount.trim() ? Number(serving.amount) : null,
           unit: serving.unit.trim() || null,
@@ -605,9 +602,9 @@ export const FoodEntryModal = ({
             ? Number(serving.nutrients.sodium_mg)
             : null,
         }));
-        await supabase.from("food_servings").insert(servingRows);
+        await supabase.from("food_catalog_servings").insert(servingRows);
       }
-      setBarcodeTemplateId(templateId ?? null);
+      setCatalogId(templateId ?? null);
     } catch (error) {
       console.warn("Failed to sync barcode template", error);
     }
@@ -615,8 +612,16 @@ export const FoodEntryModal = ({
 
   const handleSave = async () => {
     if (!canAdd || saving) return;
+    if (!session?.user?.id) {
+      setErrorText("You must be signed in to add food items.");
+      return;
+    }
     setSaving(true);
     setErrorText(null);
+
+    let latestAuthSnapshot: AuthDebugSnapshot | null = null;
+    let activeGroupId: string | null = null;
+    let membershipEnsured = false;
 
     try {
       const costNumber = cost.trim() ? Number(cost) : null;
@@ -636,7 +641,15 @@ export const FoodEntryModal = ({
         location: location || null,
         barcode: barcode || null,
         cost: costNumber,
+        catalog_id: catalogId,
       };
+
+      activeGroupId = payloadBase.group_id ?? null;
+      if (!activeGroupId) {
+        throw new Error("Select a group before saving this item.");
+      }
+
+      console.log("[FoodEntry] Payload base", payloadBase);
 
       if (mode === "edit" && foodToEdit) {
         const { error: updateError } = await supabase
@@ -647,18 +660,76 @@ export const FoodEntryModal = ({
         targetFoodId = foodToEdit.id;
         await supabase.from("food_servings").delete().eq("food_id", foodToEdit.id);
       } else {
+        const createPayload = {
+          ...payloadBase,
+        };
+        console.log("[FoodEntry] Attempting food insert", {
+          groupId: activeGroupId,
+          contextSessionUserId: session.user.id,
+        });
+        membershipEnsured = await ensureGroupMembership(activeGroupId);
+        console.log("[FoodEntry] Membership status", {
+          groupId: activeGroupId,
+          membershipEnsured,
+        });
+        if (!membershipEnsured) {
+          console.error("Could not ensure membership before food insert", {
+            groupId: activeGroupId,
+            sessionUserId: session.user.id,
+          });
+          setErrorText("Unable to join the selected group. Please try again.");
+          setSaving(false);
+          return;
+        }
+        latestAuthSnapshot = await captureAuthDebugSnapshot("food-insert", activeGroupId);
+
+        // TEMP DEBUG: check group access according to the DB
+        const { data: canAccess, error: canAccessError } = await supabase
+          .rpc("auth_can_access_group", { target_group_id: activeGroupId });
+
+        console.log("[AuthDebug] auth_can_access_group result", {
+          groupId: activeGroupId,
+          canAccess,
+          canAccessError,
+        });
+
         const { data: food, error: foodError } = await supabase
           .from("foods")
-          .insert(payloadBase)
+          .insert(createPayload)
           .select()
           .single();
 
-        if (foodError) throw foodError;
+        if (foodError) {
+          if ((foodError as any)?.code === "42501") {
+            console.error("[RLS] Food insert blocked", {
+              groupId: activeGroupId,
+              contextSessionUserId: session.user.id,
+              authSnapshot: latestAuthSnapshot,
+              membershipEnsured,
+              error: foodError,
+            });
+          }
+          throw foodError;
+        }
         targetFoodId = food.id;
       }
 
       if (!targetFoodId) {
         throw new Error("Missing food id after save.");
+      }
+
+      const linkGroupId = foodToEdit?.group_id ?? defaultGroupId ?? null;
+      if (linkGroupId) {
+        await supabase
+          .from("group_foods")
+          .upsert(
+            {
+              group_id: linkGroupId,
+              food_id: targetFoodId,
+              created_by: session?.user?.id ?? null,
+            },
+            { onConflict: "group_id,food_id" },
+          );
       }
 
       const payload = servings.map((serving) => ({
@@ -707,7 +778,17 @@ export const FoodEntryModal = ({
       resetState();
       await onSaved();
     } catch (error: any) {
-      console.error(error);
+      if (error?.code === "42501") {
+        console.error("[RLS] Food save blocked", {
+          groupId: defaultGroupId ?? null,
+          contextSessionUserId: session?.user?.id ?? null,
+          authSnapshot: latestAuthSnapshot,
+          membershipEnsured: true,
+          error,
+        });
+      } else {
+        console.error(error);
+      }
       setErrorText(error.message ?? "Unable to save food. Check your connection.");
     } finally {
       setSaving(false);
@@ -718,13 +799,21 @@ export const FoodEntryModal = ({
 
   return (
     <>
-      <Modal visible={visible} animationType="slide" transparent onRequestClose={handleClose}>
+      <Modal
+        visible={visible}
+        animationType="slide"
+        transparent
+        onRequestClose={handleClose}
+        presentationStyle="overFullScreen"
+        statusBarTranslucent
+      >
       <KeyboardAvoidingView
         style={styles.backdrop}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 24 : 0}
       >
         <View style={styles.modalCard}>
-          <ScrollView contentContainerStyle={styles.contentContainer}>
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.contentContainer}>
             <Text style={styles.title}>{mode === "edit" ? "Edit food" : "Add food"}</Text>
             <View style={styles.photoPreviewWrapper}>
               {isScannerVisible ? (

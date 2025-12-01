@@ -37,4 +37,5 @@ export type EditableFood = {
   group_id?: string | null;
   group_name?: string | null;
   image_url?: string | null;
+  catalog_id?: string | null;
 };

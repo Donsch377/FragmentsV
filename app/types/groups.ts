@@ -12,6 +12,6 @@ export type Group = {
   role: GroupRole;
   description?: string;
   code: string;
-  stats: GroupStats;
+  stats?: GroupStats;
   lastActivity?: string;
 };

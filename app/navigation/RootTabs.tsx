@@ -8,6 +8,7 @@ import { CalendarScreen } from "../screens/CalendarScreen";
 import { AiChatScreen } from "../screens/AiChatScreen";
 import { MapScreen } from "../screens/MapScreen";
 import { UserProfileScreen } from "../screens/UserProfileScreen";
+import { RecipeCreatorScreen } from "../screens/RecipeCreatorScreen";
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -116,6 +117,11 @@ export const RootTabs = () => (
   >
     <Stack.Screen name="MainTabs" component={MainTabs} options={{ headerShown: false }} />
     <Stack.Screen name="UserProfile" component={UserProfileScreen} options={{ title: "Profile" }} />
+    <Stack.Screen
+      name="RecipeCreator"
+      component={RecipeCreatorScreen}
+      options={{ title: "Create recipe" }}
+    />
   </Stack.Navigator>
 );
 

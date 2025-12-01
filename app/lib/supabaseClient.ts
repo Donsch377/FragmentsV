@@ -19,3 +19,5 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     storage: AsyncStorage,
   },
 });
+
+console.log("[Supabase] Initialized client for", supabaseUrl);

@@ -288,7 +288,7 @@ export const UserProfileScreen = () => {
   ]);
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.container}>
       <Text style={styles.title}>User profile</Text>
       <View style={styles.segment}>
         {["Settings", "Fragments"].map((tab) => {

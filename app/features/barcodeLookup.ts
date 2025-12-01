@@ -1,5 +1,4 @@
 import { DEFAULT_FOOD_IMAGE } from "../constants/images";
-import { BARCODE_LIBRARY_GROUP } from "../constants/barcode";
 import { supabase } from "../lib/supabaseClient";
 import type { ServingFromDB } from "../types/food";
 
@@ -13,6 +12,7 @@ export type SupabaseFoodRow = {
   group_id: string | null;
   group_name: string | null;
   image_url: string | null;
+  catalog_id?: string | null;
 };
 
 type OpenFoodFactsPayload = {
@@ -89,29 +89,19 @@ export const lookupBarcode = async (rawBarcode: string): Promise<BarcodeLookupRe
 const fetchFoodFromSupabase = async (
   barcode: string,
 ): Promise<{ food: SupabaseFoodRow; servings: ServingFromDB[] } | null> => {
-  const buildQuery = () =>
-    supabase
-      .from("foods")
-      .select("id,name,best_by,location,barcode,cost,group_id,group_name,image_url")
-      .eq("barcode", barcode)
-      .order("inserted_at", { ascending: false })
-      .limit(1);
+  const catalogResult = await fetchCatalogEntry(barcode);
+  if (catalogResult) {
+    return catalogResult;
+  }
 
-  const tryFetch = async (libraryOnly: boolean) => {
-    let query = buildQuery();
-    if (libraryOnly) {
-      query = query.is("group_id", null).eq("group_name", BARCODE_LIBRARY_GROUP);
-    }
-    const { data, error } = await query.maybeSingle();
-    if (error) {
-      throw error;
-    }
-    return data ?? null;
-  };
-
-  let food = await tryFetch(true);
-  if (!food) {
-    food = await tryFetch(false);
+  const { data: food, error } = await supabase
+    .from("foods")
+    .select("id,name,best_by,location,barcode,cost,group_id,group_name,image_url,catalog_id")
+    .eq("barcode", barcode)
+    .order("inserted_at", { ascending: false })
+    .maybeSingle();
+  if (error) {
+    throw error;
   }
   if (!food) {
     return null;
@@ -127,6 +117,65 @@ const fetchFoodFromSupabase = async (
   }
 
   return { food, servings: servings ?? [] };
+};
+
+const fetchCatalogEntry = async (
+  barcode: string,
+): Promise<{ food: SupabaseFoodRow; servings: ServingFromDB[] } | null> => {
+  const { data, error } = await supabase
+    .from("food_catalog")
+    .select("id,name,barcode,image_url")
+    .eq("barcode", barcode)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  const { data: catalogServings, error: servingError } = await supabase
+    .from("food_catalog_servings")
+    .select("*")
+    .eq("catalog_id", data.id);
+
+  if (servingError) {
+    throw servingError;
+  }
+
+  const servings: ServingFromDB[] = (catalogServings ?? []).map((row: any) => ({
+    id: row.id,
+    food_id: data.id,
+    label: row.label,
+    amount: row.amount,
+    unit: row.unit,
+    energy_kcal: row.energy_kcal,
+    protein_g: row.protein_g,
+    carbs_g: row.carbs_g,
+    fat_g: row.fat_g,
+    sat_fat_g: row.sat_fat_g,
+    trans_fat_g: row.trans_fat_g,
+    fiber_g: row.fiber_g,
+    sugar_g: row.sugar_g,
+    sodium_mg: row.sodium_mg,
+  }));
+
+  const food: SupabaseFoodRow = {
+    id: data.id,
+    name: data.name,
+    barcode: data.barcode,
+    best_by: null,
+    location: null,
+    cost: null,
+    group_id: null,
+    group_name: "Catalog",
+    image_url: data.image_url,
+    catalog_id: data.id,
+  };
+
+  return { food, servings };
 };
 
 const fetchFromOpenFoodFacts = async (
