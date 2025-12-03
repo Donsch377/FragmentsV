@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Modal,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -31,6 +32,7 @@ export const GroupsScreen = () => {
   const [newGroupName, setNewGroupName] = useState("");
   const [newGroupDescription, setNewGroupDescription] = useState("");
   const [joinCode, setJoinCode] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
 
   const orderedGroups = useMemo(() => {
     if (!groups.length) return [];
@@ -63,27 +65,34 @@ export const GroupsScreen = () => {
     };
   };
 
-  useEffect(() => {
-    const loadGroups = async () => {
-      setLoading(true);
-      try {
-        if (session?.user?.id) {
-          await ensureSoloGroup(session.user.id);
-        }
-        const { data, error } = await supabase
-          .from("groups")
-          .select("*")
-          .order("created_at", { ascending: true });
-        if (error) throw error;
-        setGroups((data ?? []).map(mapRowToGroup));
-      } catch (error) {
-        console.error(error);
-      } finally {
-        setLoading(false);
+  const loadGroups = useCallback(async () => {
+    setLoading(true);
+    try {
+      if (session?.user?.id) {
+        await ensureSoloGroup(session.user.id);
       }
-    };
-    loadGroups();
+      const { data, error } = await supabase
+        .from("groups")
+        .select("*")
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+      setGroups((data ?? []).map(mapRowToGroup));
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
   }, [session?.user?.id]);
+
+  useEffect(() => {
+    loadGroups();
+  }, [loadGroups]);
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadGroups();
+    setRefreshing(false);
+  }, [loadGroups]);
 
   const handleSelectGroup = (group: Group) => {
     navigation.navigate("GroupDetail", { groupId: group.id, group });
@@ -176,7 +185,11 @@ export const GroupsScreen = () => {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["left", "right", "bottom"]}>
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.contentContainer}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.contentContainer}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#ffffff" />}
+      >
         <View style={styles.header}>
           <Text style={styles.heading}>Your Groups</Text>
           <Text style={styles.subheading}>Personal shelves plus shared crews all in one feed.</Text>

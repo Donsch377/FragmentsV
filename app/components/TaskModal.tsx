@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   KeyboardAvoidingView,
@@ -22,6 +22,7 @@ type TaskModalProps = {
   onClose: () => void;
   onSaved: () => Promise<void> | void;
   defaultGroupId?: string | null;
+  initialTask?: TaskDraft | null;
 };
 
 type LinkedRecord = { id: string; name: string; group_name?: string | null };
@@ -31,13 +32,35 @@ type PickerState = { target: PickerTarget; mode: PickerMode } | null;
 type LinkTarget = "text" | "pantry" | "recipe";
 type SelectorState = { mode: Exclude<LinkTarget, "text">; query: string } | null;
 
+type TaskDraft = {
+  title?: string;
+  notes?: string;
+  startDate?: string;
+  startTime?: string;
+  dueDate?: string;
+  dueTime?: string;
+  groupId?: string | null;
+  link?: {
+    text?: string;
+    pantryId?: string;
+    recipeId?: string;
+  };
+  assignees?: string[];
+};
+
 const LINK_TARGETS: { label: string; value: LinkTarget }[] = [
   { label: "Text", value: "text" },
   { label: "Pantry", value: "pantry" },
   { label: "Recipe", value: "recipe" },
 ];
 
-export const TaskModal = ({ visible, onClose, onSaved, defaultGroupId }: TaskModalProps) => {
+export const TaskModal = ({
+  visible,
+  onClose,
+  onSaved,
+  defaultGroupId,
+  initialTask = null,
+}: TaskModalProps) => {
   const { session } = useAuth();
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
@@ -97,18 +120,49 @@ export const TaskModal = ({ visible, onClose, onSaved, defaultGroupId }: TaskMod
     ? dueDateValue.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
     : "Pick due time";
 
-  const reset = () => {
-    setTitle("");
-    setNotes("");
-    setStartDateValue(new Date());
-    setDueDateValue(null);
-    setLinkTargets({ text: true, pantry: false, recipe: false });
-    setLinkNotes("");
-    setAssigneesInput("");
-    setSelectedPantry(null);
-    setSelectedRecipe(null);
-    setPickerState(null);
-  };
+  const applyDraft = useCallback(
+    (draft: TaskDraft | null) => {
+      const parseDate = (dateValue?: string, timeValue?: string): Date | null => {
+        if (!dateValue) return null;
+        const normalizedTime = timeValue ?? "09:00";
+        const candidate = new Date(`${dateValue}T${normalizedTime}`);
+        return Number.isNaN(candidate.getTime()) ? null : candidate;
+      };
+
+      if (draft) {
+        setTitle(draft.title ?? "");
+        setNotes(draft.notes ?? "");
+        setStartDateValue(parseDate(draft.startDate, draft.startTime) ?? new Date());
+        setDueDateValue(parseDate(draft.dueDate, draft.dueTime));
+        const link = draft.link ?? {};
+        setLinkTargets({
+          text: Boolean(link.text),
+          pantry: Boolean(link.pantryId),
+          recipe: Boolean(link.recipeId),
+        });
+        setLinkNotes(link.text ?? "");
+        setAssigneesInput(draft.assignees?.join(", ") ?? "");
+        setSelectedGroupId(draft.groupId ?? defaultGroupId ?? null);
+      } else {
+        setTitle("");
+        setNotes("");
+        setStartDateValue(new Date());
+        setDueDateValue(null);
+        setLinkTargets({ text: true, pantry: false, recipe: false });
+        setLinkNotes("");
+        setAssigneesInput("");
+        setSelectedGroupId(defaultGroupId ?? null);
+      }
+      setSelectedPantry(null);
+      setSelectedRecipe(null);
+      setPickerState(null);
+    },
+    [defaultGroupId],
+  );
+
+  const reset = useCallback(() => {
+    applyDraft(null);
+  }, [applyDraft]);
 
   const handleClose = () => {
     if (saving) return;
@@ -118,9 +172,8 @@ export const TaskModal = ({ visible, onClose, onSaved, defaultGroupId }: TaskMod
 
   useEffect(() => {
     if (!visible) return;
-    setStartDateValue(new Date());
-    setDueDateValue(null);
-  }, [visible]);
+    applyDraft(initialTask);
+  }, [visible, initialTask, applyDraft]);
 
   useEffect(() => {
     if (!visible) {

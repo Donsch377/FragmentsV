@@ -39,3 +39,32 @@ export type EditableFood = {
   image_url?: string | null;
   catalog_id?: string | null;
 };
+
+export type FoodLogEntry = {
+  id: string;
+  food_id: string | null;
+  serving_id: string | null;
+  group_id: string | null;
+  user_id: string | null;
+  quantity: number;
+  logged_date: string;
+  notes?: string | null;
+  inserted_at: string;
+  food?: EditableFood | null;
+  serving?: ServingFromDB | null;
+  food_name?: string | null;
+  food_image_url?: string | null;
+  food_group_name?: string | null;
+  serving_label?: string | null;
+  serving_amount?: number | null;
+  serving_unit?: string | null;
+  energy_kcal?: number | null;
+  protein_g?: number | null;
+  carbs_g?: number | null;
+  fat_g?: number | null;
+  sat_fat_g?: number | null;
+  trans_fat_g?: number | null;
+  fiber_g?: number | null;
+  sugar_g?: number | null;
+  sodium_mg?: number | null;
+};

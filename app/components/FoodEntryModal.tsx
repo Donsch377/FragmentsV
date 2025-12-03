@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -19,7 +19,7 @@ import { DEFAULT_FOOD_IMAGE } from "../constants/images";
 import { lookupBarcode, type BarcodeLookupResult } from "../features/barcodeLookup";
 import { supabase } from "../lib/supabaseClient";
 import { useAuth } from "../providers/AuthProvider";
-import { ensureGroupMembership } from "../utils/groups";
+import { ensureGroupMembership, fetchAccessibleGroups } from "../utils/groups";
 import { captureAuthDebugSnapshot, type AuthDebugSnapshot } from "../utils/authDebug";
 import type {
   EditableFood,
@@ -73,6 +73,8 @@ type FoodEntryModalProps = {
   defaultGroupName?: string | null;
   foodToEdit?: EditableFood | null;
   servingsToEdit?: ServingFromDB[];
+  initialFood?: EditableFood | null;
+  initialServings?: ServingFromDB[];
 };
 
 export const FoodEntryModal = ({
@@ -83,7 +85,9 @@ export const FoodEntryModal = ({
   defaultGroupId,
   defaultGroupName,
   foodToEdit,
-  servingsToEdit = [],
+  servingsToEdit,
+  initialFood = null,
+  initialServings,
 }: FoodEntryModalProps) => {
   const { session } = useAuth();
   const [name, setName] = useState("");
@@ -104,10 +108,18 @@ export const FoodEntryModal = ({
   const [permission, requestPermission] = useCameraPermissions();
   const [photoUploadStatus, setPhotoUploadStatus] = useState<"idle" | "uploading" | "done">("idle");
   const [catalogId, setCatalogId] = useState<string | null>(null);
+  const [groupOptions, setGroupOptions] = useState<{ id: string; name: string }[]>([]);
+  const [groupMenuOpen, setGroupMenuOpen] = useState(false);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(defaultGroupId ?? null);
+  const [selectedGroupLabel, setSelectedGroupLabel] = useState<string>(defaultGroupName ?? "");
+  const selectedGroupIdRef = useRef<string | null>(defaultGroupId ?? null);
+  const selectedGroupLabelRef = useRef<string>(defaultGroupName ?? "");
+  const normalizedServingsToEdit = useMemo(() => servingsToEdit ?? [], [servingsToEdit]);
+  const normalizedInitialServings = useMemo(() => initialServings ?? [], [initialServings]);
 
   const canAdd = useMemo(() => name.trim().length > 0 && servings.length > 0, [name, servings.length]);
 
-  const resetState = () => {
+  const resetState = useCallback(() => {
     setName("");
     setBestBy("");
     setLocation("");
@@ -121,8 +133,33 @@ export const FoodEntryModal = ({
     setScannerComponent(null);
     setPhotoUploadStatus("idle");
     setCatalogId(null);
+    setGroupMenuOpen(false);
+    setSelectedGroupId(defaultGroupId ?? null);
+    setSelectedGroupLabel(defaultGroupName ?? "");
     scannerLockRef.current = false;
-  };
+  }, [defaultGroupId, defaultGroupName]);
+
+  const hydrateFromFood = useCallback(
+    (source: EditableFood, seedServings: ServingFromDB[] = []) => {
+      setName(source.name ?? "");
+      setBestBy(source.best_by ?? "");
+      setLocation(source.location ?? "");
+      setBarcode(source.barcode ?? "");
+      setCost(
+        source.cost !== null && source.cost !== undefined ? String(source.cost) : "",
+      );
+      setImageUrl(source.image_url ?? null);
+      setCatalogId(source.catalog_id ?? null);
+      if (seedServings.length) {
+        setServings(seedServings.map(mapServingFromDBRow));
+      } else {
+        setServings([createServing()]);
+      }
+      setSelectedGroupId(source.group_id ?? defaultGroupId ?? null);
+      setSelectedGroupLabel(source.group_name ?? defaultGroupName ?? "");
+    },
+    [defaultGroupId, defaultGroupName],
+  );
 
   const handleClose = () => {
     if (!saving) {
@@ -498,31 +535,83 @@ export const FoodEntryModal = ({
 
   useEffect(() => {
     if (!visible) {
-      resetState();
       return;
     }
 
     if (mode === "edit" && foodToEdit) {
-      setName(foodToEdit.name ?? "");
-      setBestBy(foodToEdit.best_by ?? "");
-      setLocation(foodToEdit.location ?? "");
-      setBarcode(foodToEdit.barcode ?? "");
-      setCost(
-        foodToEdit.cost !== null && foodToEdit.cost !== undefined
-          ? String(foodToEdit.cost)
-          : "",
-      );
-      setImageUrl(foodToEdit.image_url ?? null);
-      setCatalogId(foodToEdit.catalog_id ?? null);
-      if (servingsToEdit.length) {
-        setServings(servingsToEdit.map(mapServingFromDBRow));
-      } else {
-        setServings([createServing()]);
-      }
-    } else if (mode === "create") {
-      resetState();
+      hydrateFromFood(foodToEdit, normalizedServingsToEdit);
+      return;
     }
-  }, [visible, mode, foodToEdit, servingsToEdit]);
+
+    if (initialFood) {
+      hydrateFromFood(initialFood, normalizedInitialServings);
+      return;
+    }
+
+    resetState();
+  }, [
+    visible,
+    mode,
+    foodToEdit,
+    normalizedServingsToEdit,
+    initialFood,
+    normalizedInitialServings,
+    hydrateFromFood,
+    resetState,
+  ]);
+
+  useEffect(() => {
+    selectedGroupIdRef.current = selectedGroupId;
+  }, [selectedGroupId]);
+
+  useEffect(() => {
+    selectedGroupLabelRef.current = selectedGroupLabel;
+  }, [selectedGroupLabel]);
+
+  useEffect(() => {
+    console.log("[FoodEntryModal] group loader effect", { visible, sessionId: session?.user?.id, defaultGroupId });
+    if (!visible || !session?.user?.id) {
+      console.log("[FoodEntryModal] group loader skipped (not visible or no session)");
+      return;
+    }
+    let cancelled = false;
+    const loadGroups = async () => {
+      console.log("[FoodEntryModal] loading groups...");
+      try {
+        const groups = await fetchAccessibleGroups(session.user!.id);
+        if (cancelled) {
+          console.log("[FoodEntryModal] loadGroups cancelled");
+          return;
+        }
+        console.log("[FoodEntryModal] fetched groups", groups);
+        setGroupOptions(groups);
+        const currentId = selectedGroupIdRef.current;
+        const nextId =
+          (currentId && groups.some((group) => group.id === currentId) && currentId) ||
+          (defaultGroupId && groups.some((group) => group.id === defaultGroupId)
+            ? defaultGroupId
+            : groups[0]?.id ?? null);
+        console.log("[FoodEntryModal] resolving group", { currentId, nextId });
+        if (nextId !== currentId) {
+          selectedGroupIdRef.current = nextId ?? null;
+          console.log("[FoodEntryModal] updating selectedGroupId", nextId);
+          setSelectedGroupId(nextId);
+        }
+        const nextLabel = nextId ? groups.find((group) => group.id === nextId)?.name ?? "" : "";
+        if (nextLabel !== selectedGroupLabelRef.current) {
+          console.log("[FoodEntryModal] updating group label", nextLabel);
+          selectedGroupLabelRef.current = nextLabel;
+          setSelectedGroupLabel(nextLabel);
+        }
+      } catch (error) {
+        console.error("Failed to load food groups", error);
+      }
+    };
+    loadGroups();
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, session?.user?.id, defaultGroupId]);
 
   const syncBarcodeTemplate = async (
     barcodeValue: string,
@@ -630,13 +719,15 @@ export const FoodEntryModal = ({
       }
 
       let targetFoodId = foodToEdit?.id ?? null;
+      const resolvedGroupId = selectedGroupId ?? defaultGroupId ?? null;
+      const resolvedGroupName = selectedGroupLabel || defaultGroupName || null;
       const payloadBase = {
         name: name.trim(),
         notes: null,
         quantity: null,
         image_url: imageUrl || null,
-        group_name: foodToEdit?.group_name ?? defaultGroupName ?? null,
-        group_id: foodToEdit?.group_id ?? defaultGroupId ?? null,
+        group_name: resolvedGroupName,
+        group_id: resolvedGroupId,
         best_by: bestBy || null,
         location: location || null,
         barcode: barcode || null,
@@ -718,7 +809,7 @@ export const FoodEntryModal = ({
         throw new Error("Missing food id after save.");
       }
 
-      const linkGroupId = foodToEdit?.group_id ?? defaultGroupId ?? null;
+      const linkGroupId = activeGroupId;
       if (linkGroupId) {
         await supabase
           .from("group_foods")
@@ -875,6 +966,57 @@ export const FoodEntryModal = ({
                     )}
                   </TouchableOpacity>
                 </>
+              )}
+            </View>
+
+            {/* Groups */}
+            <View style={styles.section}>
+              <Text style={styles.sectionLabel}>Assign to group</Text>
+              {groupOptions.length ? (
+                <View style={styles.groupSelectionBlock}>
+                  <TouchableOpacity
+                    style={[styles.groupSelectButton, !selectedGroupId && styles.groupSelectButtonDisabled]}
+                    onPress={() => setGroupMenuOpen((prev) => !prev)}
+                  >
+                    <Text style={styles.groupSelectButtonText}>
+                      {selectedGroupLabel || "Choose a group"}
+                    </Text>
+                    <Text style={styles.groupSelectCaret}>{groupMenuOpen ? "▲" : "▼"}</Text>
+                  </TouchableOpacity>
+                  {groupMenuOpen ? (
+                    <View style={styles.groupDropdown}>
+                      {groupOptions.map((group) => {
+                        const active = group.id === selectedGroupId;
+                        return (
+                          <TouchableOpacity
+                            key={group.id}
+                            style={[styles.groupDropdownItem, active && styles.groupDropdownItemActive]}
+                            onPress={() => {
+                              setSelectedGroupId(group.id);
+                              setSelectedGroupLabel(group.name);
+                              setGroupMenuOpen(false);
+                            }}
+                          >
+                            <Text style={[styles.groupDropdownLabel, active && styles.groupDropdownLabelActive]}>
+                              {group.name}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  ) : null}
+                </View>
+              ) : selectedGroupId || selectedGroupLabel ? (
+                <TouchableOpacity style={[styles.groupSelectButton, styles.groupSelectButtonDisabled]} disabled>
+                  <Text style={styles.groupSelectButtonText}>
+                    {selectedGroupLabel || selectedGroupId || "Group selection unavailable"}
+                  </Text>
+                  <Text style={styles.groupSelectCaret}>—</Text>
+                </TouchableOpacity>
+              ) : (
+                <Text style={styles.helperText}>
+                  Create a group from the Groups tab to start organizing pantry items.
+                </Text>
               )}
             </View>
 
@@ -1083,6 +1225,11 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: "#ffffff",
   },
+  helperText: {
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 13,
+    marginTop: 6,
+  },
   photoPreviewWrapper: {
     borderRadius: 20,
     overflow: "hidden",
@@ -1156,6 +1303,51 @@ const styles = StyleSheet.create({
     color: "#050505",
     fontWeight: "700",
     fontSize: 13,
+  },
+  groupSelectionBlock: {
+    gap: 8,
+  },
+  groupSelectButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.2)",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  groupSelectButtonDisabled: {
+    opacity: 0.6,
+  },
+  groupSelectButtonText: {
+    color: "#ffffff",
+    fontSize: 15,
+  },
+  groupSelectCaret: {
+    color: "rgba(255,255,255,0.7)",
+    fontSize: 12,
+  },
+  groupDropdown: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.15)",
+    backgroundColor: "#040812",
+  },
+  groupDropdownItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  groupDropdownItemActive: {
+    backgroundColor: "rgba(15,176,106,0.08)",
+  },
+  groupDropdownLabel: {
+    color: "#ffffff",
+    fontSize: 14,
+  },
+  groupDropdownLabelActive: {
+    color: "#0fb06a",
+    fontWeight: "600",
   },
   section: {
     borderRadius: 20,

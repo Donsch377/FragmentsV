@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -6,7 +6,9 @@ import {
   Dimensions,
   FlatList,
   Image,
+  Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -118,6 +120,7 @@ export const PantryScreen = () => {
   const [formMode, setFormMode] = useState<"create" | "edit">("create");
   const [foodToEdit, setFoodToEdit] = useState<EditableFood | null>(null);
   const [servingsForEdit, setServingsForEdit] = useState<ServingFromDB[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
   const detailSnapshotRef = useRef<{
     food: Food;
     layout: { x: number; y: number; width: number; height: number };
@@ -138,7 +141,7 @@ export const PantryScreen = () => {
     }
   }, [activeRecipe?.instructions]);
 
-  const loadFoods = async () => {
+  const loadFoods = useCallback(async () => {
     if (!selectedGroupId) {
       setFoods([]);
       setIsFetchingFoods(false);
@@ -172,13 +175,13 @@ export const PantryScreen = () => {
     } finally {
       setIsFetchingFoods(false);
     }
-  };
+  }, [selectedGroupId, selectedGroupName]);
 
   useEffect(() => {
     loadFoods();
-  }, [selectedGroupId]);
+  }, [loadFoods]);
 
-  const loadRecipes = async () => {
+  const loadRecipes = useCallback(async () => {
     if (!selectedGroupId) {
       setRecipes([]);
       setIsFetchingRecipes(false);
@@ -210,11 +213,11 @@ export const PantryScreen = () => {
     } finally {
       setIsFetchingRecipes(false);
     }
-  };
+  }, [selectedGroupId]);
 
   useEffect(() => {
     loadRecipes();
-  }, [selectedGroupId]);
+  }, [loadRecipes]);
 
   const openCreateModal = () => {
     if (!selectedGroupId) {
@@ -236,60 +239,78 @@ export const PantryScreen = () => {
     rootNav?.navigate("RecipeCreator", { groupId: selectedGroupId });
   };
 
-  useEffect(() => {
-    if (!session?.user?.id) return;
-    const loadGroups = async () => {
-      const options = await fetchAccessibleGroups(session.user?.id);
-      setGroupOptions(options);
-      setSelectedGroupId((prev) => {
-        if (route?.params?.groupId) return route.params.groupId;
-        if (prev && options.some((option) => option.id === prev)) return prev;
-        return options[0]?.id ?? null;
-      });
-    };
-    loadGroups();
-  }, [session?.user?.id, route?.params?.groupId]);
+  const loadGroupOptions = useCallback(async () => {
+    if (!session?.user?.id) {
+      setGroupOptions([]);
+      setSelectedGroupId(null);
+      return [];
+    }
+    const options = await fetchAccessibleGroups(session.user.id);
+    setGroupOptions(options);
+    setSelectedGroupId((prev) => {
+      if (route?.params?.groupId) return route.params.groupId;
+      if (prev && options.some((option) => option.id === prev)) return prev;
+      return options[0]?.id ?? null;
+    });
+    return options;
+  }, [route?.params?.groupId, session?.user?.id]);
 
-  const handleDeleteFood = (food: Food) => {
-    Alert.alert(
-      "Delete food",
-      `Remove ${food.name} from this pantry?`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              if (!selectedGroupId) throw new Error("Select a group before deleting.");
-              if (food.link_id) {
-                await supabase.from("group_foods").delete().eq("id", food.link_id);
-              } else {
-                await supabase
-                  .from("group_foods")
-                  .delete()
-                  .eq("group_id", selectedGroupId)
-                  .eq("food_id", food.id);
-              }
-              const { count, error: countError } = await supabase
-                .from("group_foods")
-                .select("id", { count: "exact", head: true })
-                .eq("food_id", food.id);
-              if (countError) throw countError;
-              if (!count || count === 0) {
-                await supabase.from("foods").delete().eq("id", food.id);
-              }
-              await loadFoods();
-            } catch (error) {
-              console.error(error);
-              Alert.alert("Unable to delete", "Check your connection and try again.");
-            }
+  useEffect(() => {
+    loadGroupOptions();
+  }, [loadGroupOptions]);
+
+  const deleteFoodRecord = useCallback(
+    async (food: Food) => {
+      try {
+        if (!selectedGroupId) throw new Error("Select a group before deleting.");
+        if (food.link_id) {
+          await supabase.from("group_foods").delete().eq("id", food.link_id);
+        } else {
+          await supabase.from("group_foods").delete().eq("group_id", selectedGroupId).eq("food_id", food.id);
+        }
+        const { count, error: countError } = await supabase
+          .from("group_foods")
+          .select("id", { count: "exact", head: true })
+          .eq("food_id", food.id);
+        if (countError) throw countError;
+        if (!count || count === 0) {
+          await supabase.from("foods").delete().eq("id", food.id);
+        }
+        await loadFoods();
+      } catch (error) {
+        console.error(error);
+        Alert.alert("Unable to delete", "Check your connection and try again.");
+      }
+    },
+    [loadFoods, selectedGroupId],
+  );
+
+  const handleDeleteFood = useCallback(
+    (food: Food) => {
+      const confirmAndDelete = () => deleteFoodRecord(food);
+      if (Platform.OS === "web") {
+        const confirmed = typeof window !== "undefined" ? window.confirm(`Remove ${food.name} from this pantry?`) : true;
+        if (confirmed) {
+          confirmAndDelete();
+        }
+        return;
+      }
+      Alert.alert(
+        "Delete food",
+        `Remove ${food.name} from this pantry?`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Delete",
+            style: "destructive",
+            onPress: confirmAndDelete,
           },
-        },
-      ],
-      { cancelable: true },
-    );
-  };
+        ],
+        { cancelable: true },
+      );
+    },
+    [deleteFoodRecord],
+  );
 
   const loadFoodServings = async (foodId: string, options?: { silent?: boolean }) => {
     if (!options?.silent) {
@@ -359,6 +380,13 @@ export const PantryScreen = () => {
     const shouldRestore = restoreDetailAfterModalRef.current;
     dismissFoodModal(shouldRestore);
   };
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadGroupOptions();
+    await Promise.all([loadFoods(), loadRecipes()]);
+    setRefreshing(false);
+  }, [loadGroupOptions, loadFoods, loadRecipes]);
 
   const handleModalSaved = async () => {
     const updated = await loadFoods();
@@ -573,7 +601,18 @@ export const PantryScreen = () => {
         });
       }}
     >
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+        alwaysBounceVertical
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor="#ffffff"
+          />
+        }
+      >
         <View style={styles.inventoryCard}>
           <View style={styles.inventoryHeader}>
           <Text style={styles.inventoryHeading}>Inventory view</Text>

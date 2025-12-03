@@ -18,8 +18,21 @@ import { useAuth } from "../providers/AuthProvider";
 import { ensureGroupMembership, fetchAccessibleGroups } from "../utils/groups";
 import { captureAuthDebugSnapshot, type AuthDebugSnapshot } from "../utils/authDebug";
 
+type RecipeCreatorDraft = {
+  title: string;
+  prepTimeMinutes?: number;
+  cookTimeMinutes?: number;
+  servings?: number;
+  groupId?: string | null;
+  ingredients: RecipeIngredient[];
+  steps: RecipeStep[];
+  nutrition: RecipeNutritionField[];
+  databoxes: RecipeDatabox[];
+};
+
 type RecipeCreatorRouteParams = {
   groupId?: string | null;
+  initialRecipe?: RecipeCreatorDraft | null;
 };
 
 type RecipeCreatorRoute = RouteProp<{ RecipeCreator: RecipeCreatorRouteParams }, "RecipeCreator">;
@@ -53,6 +66,7 @@ export const RecipeCreatorScreen = () => {
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(route.params?.groupId ?? null);
   const [groupMenuOpen, setGroupMenuOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const initialRecipeDraft = route.params?.initialRecipe;
 
   const servingsNumber = Number(servings) || 0;
   const prepMinutes = Number(prepTime) || 0;
@@ -85,6 +99,33 @@ export const RecipeCreatorScreen = () => {
     };
     loadGroups();
   }, [session?.user?.id, route.params?.groupId]);
+
+  useEffect(() => {
+    if (!initialRecipeDraft) return;
+    setTitle(initialRecipeDraft.title ?? "");
+    setPrepTime(
+      initialRecipeDraft.prepTimeMinutes !== undefined && initialRecipeDraft.prepTimeMinutes !== null
+        ? String(initialRecipeDraft.prepTimeMinutes)
+        : "",
+    );
+    setCookTime(
+      initialRecipeDraft.cookTimeMinutes !== undefined && initialRecipeDraft.cookTimeMinutes !== null
+        ? String(initialRecipeDraft.cookTimeMinutes)
+        : "",
+    );
+    setServings(
+      initialRecipeDraft.servings !== undefined && initialRecipeDraft.servings !== null
+        ? String(initialRecipeDraft.servings)
+        : "",
+    );
+    setIngredients(initialRecipeDraft.ingredients ?? []);
+    setSteps(initialRecipeDraft.steps ?? []);
+    setNutritionFields(initialRecipeDraft.nutrition ?? []);
+    setDataboxes(initialRecipeDraft.databoxes ?? []);
+    if (initialRecipeDraft.groupId) {
+      setSelectedGroupId(initialRecipeDraft.groupId);
+    }
+  }, [initialRecipeDraft]);
 
   const addIngredient = () => {
     const newIngredient: RecipeIngredient = {

@@ -1,14 +1,45 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Alert, FlatList, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { Alert, FlatList, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { supabase } from "../lib/supabaseClient";
 import type { TaskRecord } from "../types/tasks";
 import { TaskModal } from "../components/TaskModal";
 import { useAuth } from "../providers/AuthProvider";
+import type { FoodLogEntry } from "../types/food";
+import { FoodLogModal } from "../components/FoodLogModal";
+import { FoodLogDetailsModal } from "../components/FoodLogDetailsModal";
 
 type RangeOption = "1d" | "5d" | "7d" | "14d" | "Month";
 
 const RANGE_OPTIONS: RangeOption[] = ["1d", "5d", "7d", "14d", "Month"];
+
+type ServingField = keyof NonNullable<FoodLogEntry["serving"]>;
+
+type NutritionMetric =
+  | "Calories"
+  | "Protein"
+  | "Carbs"
+  | "Fat"
+  | "Fiber"
+  | "Sodium"
+  | "Potassium"
+  | "Sugar";
+
+const DEFAULT_NUTRITION_METRICS: NutritionMetric[] = ["Calories", "Protein", "Carbs"];
+
+const NUTRITION_FIELD_MAP: Record<
+  NutritionMetric,
+  { field: ServingField | null; unit: string }
+> = {
+  Calories: { field: "energy_kcal", unit: "kcal" },
+  Protein: { field: "protein_g", unit: "g" },
+  Carbs: { field: "carbs_g", unit: "g" },
+  Fat: { field: "fat_g", unit: "g" },
+  Fiber: { field: "fiber_g", unit: "g" },
+  Sodium: { field: "sodium_mg", unit: "mg" },
+  Potassium: { field: null, unit: "mg" },
+  Sugar: { field: "sugar_g", unit: "g" },
+};
 
 const formatDate = (date: Date) =>
   date.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
@@ -104,9 +135,18 @@ export const CalendarScreen = () => {
   const [selectedMonthDate, setSelectedMonthDate] = useState<Date>(new Date());
   const [rawTasks, setRawTasks] = useState<TaskRecord[]>([]);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
+  const [foodLogs, setFoodLogs] = useState<FoodLogEntry[]>([]);
+  const [foodLogsLoading, setFoodLogsLoading] = useState(false);
+  const [foodLogModalVisible, setFoodLogModalVisible] = useState(false);
+  const [foodLogsAvailable, setFoodLogsAvailable] = useState(true);
+  const [selectedFoodLog, setSelectedFoodLog] = useState<FoodLogEntry | null>(null);
+  const [nutritionMetrics, setNutritionMetrics] = useState<NutritionMetric[]>(DEFAULT_NUTRITION_METRICS);
+  const [nutritionPrefsLoading, setNutritionPrefsLoading] = useState(false);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [taskModalVisible, setTaskModalVisible] = useState(false);
   const [userLabels, setUserLabels] = useState<string[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [deletingLogId, setDeletingLogId] = useState<string | null>(null);
   const now = new Date();
   const monthCells = useMemo(() => buildMonthCalendar(selectedMonthDate), [selectedMonthDate]);
   const monthWeeks = useMemo(() => chunkIntoWeeks(monthCells), [monthCells]);
@@ -142,13 +182,110 @@ export const CalendarScreen = () => {
   };
   const formatAssignees = (task: TaskRecord) =>
     task.assignee_names?.length ? `Assigned to ${task.assignee_names.join(", ")}` : "";
+  const resolveFoodName = (log: FoodLogEntry) => log.food?.name ?? log.food_name ?? "Food item";
+  const resolveFoodGroup = (log: FoodLogEntry) => log.food?.group_name ?? log.food_group_name ?? null;
+  const resolveServingLabel = (log: FoodLogEntry) => log.serving?.label ?? log.serving_label ?? "Serving";
+  const resolveServingAmount = (log: FoodLogEntry) =>
+    log.serving?.amount ?? log.serving_amount ?? null;
+  const resolveServingUnit = (log: FoodLogEntry) => log.serving?.unit ?? log.serving_unit ?? null;
+  const getNutrientValue = (entry: FoodLogEntry, field: ServingField): number | null => {
+    const fromServing = entry.serving?.[field];
+    if (typeof fromServing === "number") {
+      return fromServing;
+    }
+    const fallback = entry[field];
+    if (typeof fallback === "number") {
+      return fallback;
+    }
+    if (typeof fallback === "string") {
+      const parsed = Number(fallback);
+      return Number.isNaN(parsed) ? null : parsed;
+    }
+    return null;
+  };
+
+  const describeFoodLog = useCallback((log: FoodLogEntry) => {
+    const quantityValue =
+      typeof log.quantity === "number" && Number.isFinite(log.quantity)
+        ? log.quantity
+        : Number(log.quantity ?? 0) || 0;
+    const servingLabel = resolveServingLabel(log);
+    const servingsLabel = `${quantityValue || 0} × ${servingLabel}`;
+    const amountValue = resolveServingAmount(log);
+    const unitValue = resolveServingUnit(log);
+    const amountLabel =
+      amountValue !== null && amountValue !== undefined
+        ? `${amountValue}${unitValue ? ` ${unitValue}` : ""}`
+        : null;
+    const groupLabel = resolveFoodGroup(log);
+    return [servingsLabel, amountLabel, groupLabel].filter(Boolean).join(" · ");
+  }, []);
   const renderTodayView = () => {
     const todaysTasks = getTasksForDate(now, true);
     return (
       <>
         <View style={styles.section}>
-          <Text style={styles.sectionHeading}>Today’s Eating</Text>
-          <Text style={styles.sectionSubheading}>No meal data yet</Text>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionHeading}>Today’s Eating</Text>
+            <TouchableOpacity
+              style={[styles.taskButton, !foodLogsAvailable && styles.taskButtonDisabled]}
+              onPress={() => setFoodLogModalVisible(true)}
+              disabled={!foodLogsAvailable}
+            >
+              <Text style={styles.taskButtonText}>Log food</Text>
+            </TouchableOpacity>
+          </View>
+          {!foodLogsAvailable ? (
+            <Text style={styles.sectionSubheading}>
+              Food logging isn’t ready yet. Run ./fragments-supabase/supabase-start.sh to refresh the database schema.
+            </Text>
+          ) : (
+            <>
+              {nutritionMetrics.length ? (
+                <View style={styles.nutritionSummaryRow}>
+                  {nutritionMetrics.map((metric) => (
+                    <View key={metric} style={styles.nutritionSummaryCard}>
+                      <Text style={styles.nutritionSummaryLabel}>{metric}</Text>
+                      {nutritionPrefsLoading && foodLogsLoading ? (
+                        <Text style={styles.nutritionSummaryValue}>Loading…</Text>
+                      ) : (
+                        <Text style={styles.nutritionSummaryValue}>
+                          {formatNutritionValue(metric, nutritionTotals[metric] ?? null)}
+                        </Text>
+                      )}
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+              {foodLogsLoading ? (
+                <Text style={styles.sectionSubheading}>Loading meals...</Text>
+              ) : foodLogs.length === 0 ? (
+                <Text style={styles.sectionSubheading}>No meal data yet</Text>
+              ) : (
+                foodLogs.map((entry) => (
+                  <View key={entry.id} style={styles.mealRow}>
+                    <TouchableOpacity style={styles.mealInfo} onPress={() => setSelectedFoodLog(entry)}>
+                      <Text style={styles.mealName}>{resolveFoodName(entry)}</Text>
+                      <Text style={styles.mealMeta}>{describeFoodLog(entry)}</Text>
+                      {entry.notes ? <Text style={styles.mealMeta}>{entry.notes}</Text> : null}
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.mealDeleteButton,
+                        deletingLogId === entry.id && styles.mealDeleteButtonDisabled,
+                      ]}
+                      onPress={() => confirmDeleteFoodLog(entry)}
+                      disabled={deletingLogId === entry.id}
+                    >
+                      <Text style={styles.mealDeleteText}>
+                        {deletingLogId === entry.id ? "Deleting…" : "Delete"}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                ))
+              )}
+            </>
+          )}
         </View>
         <View style={styles.section}>
           <View style={styles.sectionHeaderRow}>
@@ -293,7 +430,7 @@ const renderMonthView = () => (
     </View>
   );
 
-  const loadTasks = async () => {
+  const loadTasks = useCallback(async () => {
     try {
       setTasksLoading(true);
       const { data, error } = await supabase
@@ -308,11 +445,77 @@ const renderMonthView = () => (
     } finally {
       setTasksLoading(false);
     }
-  };
+  }, []);
+
+  const loadFoodLogs = useCallback(async () => {
+    if (!session?.user?.id) {
+      setFoodLogs([]);
+      return;
+    }
+    try {
+      setFoodLogsLoading(true);
+      const todayKey = formatDateKey(new Date());
+      const { data, error } = await supabase
+        .from("food_logs")
+        .select(
+          "*, food:foods(id, name, group_name, image_url), serving:food_servings(id, food_id, label, amount, unit, energy_kcal, protein_g, carbs_g, fat_g, sat_fat_g, trans_fat_g, fiber_g, sugar_g, sodium_mg)",
+        )
+        .eq("logged_date", todayKey)
+        .order("inserted_at", { ascending: false });
+      if (error) throw error;
+      setFoodLogsAvailable(true);
+      setFoodLogs(data ?? []);
+    } catch (error) {
+      console.error("Failed to load food logs", error);
+      if ((error as any)?.code === "PGRST205") {
+        setFoodLogsAvailable(false);
+        return;
+      }
+    } finally {
+      setFoodLogsLoading(false);
+    }
+  }, [session?.user?.id]);
+
+  const loadNutritionPreferences = useCallback(async () => {
+    if (!session?.user?.id) {
+      setNutritionMetrics(DEFAULT_NUTRITION_METRICS);
+      return;
+    }
+    try {
+      setNutritionPrefsLoading(true);
+      const { data, error } = await supabase
+        .from("nutrition_preferences")
+        .select("metrics")
+        .eq("profile_id", session.user.id)
+        .maybeSingle();
+      if (error) throw error;
+      if (data?.metrics && Array.isArray(data.metrics)) {
+        const filtered = (data.metrics as string[]).filter((entry): entry is NutritionMetric =>
+          Object.prototype.hasOwnProperty.call(NUTRITION_FIELD_MAP, entry),
+        );
+        setNutritionMetrics(filtered.length ? filtered : DEFAULT_NUTRITION_METRICS);
+      } else {
+        setNutritionMetrics(DEFAULT_NUTRITION_METRICS);
+      }
+    } catch (error) {
+      console.error("Failed to load nutrition preferences", error);
+      setNutritionMetrics(DEFAULT_NUTRITION_METRICS);
+    } finally {
+      setNutritionPrefsLoading(false);
+    }
+  }, [session?.user?.id]);
 
   useEffect(() => {
     loadTasks();
-  }, []);
+  }, [loadTasks]);
+
+  useEffect(() => {
+    loadFoodLogs();
+  }, [loadFoodLogs]);
+
+  useEffect(() => {
+    loadNutritionPreferences();
+  }, [loadNutritionPreferences]);
 
   useEffect(() => {
     if (!session?.user) {
@@ -345,6 +548,46 @@ const renderMonthView = () => (
     };
   }, [session?.user?.id]);
 
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await Promise.all([loadTasks(), loadFoodLogs(), loadNutritionPreferences()]);
+    setRefreshing(false);
+  }, [loadTasks, loadFoodLogs, loadNutritionPreferences]);
+
+  const deleteFoodLog = useCallback(
+    async (entryId: string) => {
+      try {
+        setDeletingLogId(entryId);
+        const { error } = await supabase.from("food_logs").delete().eq("id", entryId);
+        if (error) throw error;
+        if (selectedFoodLog?.id === entryId) {
+          setSelectedFoodLog(null);
+        }
+        await loadFoodLogs();
+      } catch (error) {
+        console.error("Failed to delete food log", error);
+        Alert.alert("Unable to delete entry", "Please try again.");
+      } finally {
+        setDeletingLogId((current) => (current === entryId ? null : current));
+      }
+    },
+    [loadFoodLogs, selectedFoodLog?.id],
+  );
+
+  const confirmDeleteFoodLog = useCallback(
+    (entry: FoodLogEntry) => {
+      Alert.alert(
+        "Delete log?",
+        `Remove ${resolveFoodName(entry)} from ${entry.logged_date ?? "today"}?`,
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Delete", style: "destructive", onPress: () => deleteFoodLog(entry.id) },
+        ],
+      );
+    },
+    [deleteFoodLog],
+  );
+
   const applyAssigneeFilter = useCallback(
     (records: TaskRecord[]) => {
       if (!userLabels.length) return records;
@@ -360,6 +603,41 @@ const renderMonthView = () => (
   useEffect(() => {
     setTasks(applyAssigneeFilter(rawTasks));
   }, [rawTasks, applyAssigneeFilter]);
+
+  const nutritionTotals = useMemo(() => {
+    const totals: Record<NutritionMetric, number | null> = {} as Record<NutritionMetric, number | null>;
+    nutritionMetrics.forEach((metric) => {
+      const field = NUTRITION_FIELD_MAP[metric].field;
+      totals[metric] = field ? 0 : null;
+    });
+    if (!foodLogs.length) {
+      return totals;
+    }
+    foodLogs.forEach((log) => {
+      const quantityValue = Number(log.quantity ?? 0) || 0;
+      if (!quantityValue) return;
+      nutritionMetrics.forEach((metric) => {
+        const field = NUTRITION_FIELD_MAP[metric].field;
+        if (!field) return;
+        const baseValue = getNutrientValue(log, field);
+        if (baseValue === null) return;
+        const numericBase = baseValue;
+        if (!Number.isFinite(numericBase)) {
+          return;
+        }
+        totals[metric] = (totals[metric] ?? 0) + numericBase * quantityValue;
+      });
+    });
+    return totals;
+  }, [foodLogs, nutritionMetrics]);
+
+  const formatNutritionValue = (metric: NutritionMetric, value: number | null) => {
+    if (value === null) {
+      return "Not tracked";
+    }
+    const rounded = Math.round(value * 10) / 10;
+    return `${Number.isFinite(rounded) ? rounded : 0} ${NUTRITION_FIELD_MAP[metric].unit}`;
+  };
 
   const toggleTaskCompleted = async (task: TaskRecord) => {
     const previous = rawTasks;
@@ -404,7 +682,11 @@ const renderMonthView = () => (
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["left", "right", "bottom"]}>
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.contentContainer}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.contentContainer}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#ffffff" />}
+      >
         <View style={styles.header}>
           <Text style={styles.title}>Today</Text>
           <Text style={styles.dateText}>{formatDate(new Date())}</Text>
@@ -439,6 +721,22 @@ const renderMonthView = () => (
           />
         )}
       </ScrollView>
+      {foodLogsAvailable ? (
+        <FoodLogModal
+          visible={foodLogModalVisible}
+          onClose={() => setFoodLogModalVisible(false)}
+          onLogged={() => {
+            setFoodLogModalVisible(false);
+            loadFoodLogs();
+          }}
+          targetDate={formatDateKey(new Date())}
+        />
+      ) : null}
+      <FoodLogDetailsModal
+        visible={Boolean(selectedFoodLog)}
+        entry={selectedFoodLog}
+        onClose={() => setSelectedFoodLog(null)}
+      />
       <TaskModal
         visible={taskModalVisible}
         onClose={() => setTaskModalVisible(false)}
@@ -525,6 +823,36 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.2)",
   },
+  taskButtonDisabled: {
+    opacity: 0.4,
+  },
+  nutritionSummaryRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 12,
+    marginBottom: 4,
+  },
+  nutritionSummaryCard: {
+    flexGrow: 1,
+    minWidth: 120,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    padding: 12,
+    backgroundColor: "rgba(15,176,106,0.06)",
+  },
+  nutritionSummaryLabel: {
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    fontSize: 11,
+    color: "rgba(255,255,255,0.65)",
+    marginBottom: 6,
+  },
+  nutritionSummaryValue: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#ffffff",
+  },
   taskButtonText: {
     color: "#ffffff",
     fontWeight: "600",
@@ -534,6 +862,12 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(255,255,255,0.08)",
+    flexDirection: "row",
+    gap: 12,
+    alignItems: "center",
+  },
+  mealInfo: {
+    flex: 1,
   },
   mealName: {
     fontSize: 16,
@@ -592,6 +926,21 @@ const styles = StyleSheet.create({
     color: "#f87171",
     fontSize: 12,
     fontWeight: "600",
+  },
+  mealDeleteButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(248,113,113,0.7)",
+  },
+  mealDeleteButtonDisabled: {
+    opacity: 0.5,
+  },
+  mealDeleteText: {
+    color: "#f87171",
+    fontWeight: "700",
+    fontSize: 12,
   },
   taskDone: {
     color: "rgba(255,255,255,0.4)",

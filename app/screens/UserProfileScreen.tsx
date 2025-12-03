@@ -97,7 +97,7 @@ export const UserProfileScreen = () => {
 
     loadPreferences();
     loadFragments();
-  }, []);
+  }, [profileId]);
 
   const handleSavePreferences = async () => {
     setIsSavingPrefs(true);
