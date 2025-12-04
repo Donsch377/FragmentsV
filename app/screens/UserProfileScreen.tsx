@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -14,6 +14,9 @@ import {
 } from "react-native";
 import { supabase } from "../lib/supabaseClient";
 import { useAuth } from "../providers/AuthProvider";
+import { useAiPreferences, type LlmProvider } from "../providers/AiPreferencesProvider";
+import { ON_DEVICE_MODEL_MAP, type OnDeviceModelKey } from "../constants/onDeviceModels";
+import { CHAT_RESPONSE_MODES, type ChatResponseMode } from "../constants/aiConfig";
 
 if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -35,6 +38,14 @@ type NutritionOption = (typeof NUTRITION_OPTIONS)[number];
 export const UserProfileScreen = () => {
   const { session } = useAuth();
   const profileId = session?.user?.id ?? "dev-user";
+  const {
+    provider: aiProvider,
+    setProvider: setAiProvider,
+    modelKey,
+    setModelKey,
+    chatMode,
+    setChatMode,
+  } = useAiPreferences();
   const [activeSection, setActiveSection] = useState<"Settings" | "Fragments">("Settings");
   const [nutritionOpen, setNutritionOpen] = useState(true);
   const [selectedMetrics, setSelectedMetrics] = useState<NutritionOption[]>(["Calories", "Protein"]);
@@ -46,6 +57,26 @@ export const UserProfileScreen = () => {
   const [fragments, setFragments] = useState<Array<{ id: string; title: string; description: string | null }>>([]);
   const [fragmentsLoading, setFragmentsLoading] = useState(true);
   const [prefsLoading, setPrefsLoading] = useState(true);
+  const isIOS = Platform.OS === "ios";
+  const aiOptions = useMemo(
+    () => [
+      {
+        key: "openSource" as LlmProvider,
+        title: "Download to device (ExecuTorch)",
+        description: "Streams Meta/Qwen models through react-native-executorch. First response downloads the weights to your phone.",
+        footnote: "Best privacy. Requires running the new architecture build (expo run:*).",
+        disabled: false,
+      },
+      {
+        key: "apple" as LlmProvider,
+        title: "Apple on-device",
+        description: "Use Apple Intelligence APIs (AIPromptSession/CoreLLM) when they become available on your device.",
+        footnote: isIOS ? "Requires iOS 18+ with Apple Intelligence enabled." : "Available on iOS only.",
+        disabled: !isIOS,
+      },
+    ],
+    [isIOS],
+  );
 
   const toggleMetric = (metric: NutritionOption) => {
     setSelectedMetrics((prev) =>
@@ -99,6 +130,7 @@ export const UserProfileScreen = () => {
     loadFragments();
   }, [profileId]);
 
+
   const handleSavePreferences = async () => {
     setIsSavingPrefs(true);
     setSaveMessage(null);
@@ -140,6 +172,30 @@ export const UserProfileScreen = () => {
       Alert.alert("Unable to add fragment", "Check Supabase connection.");
     }
   };
+
+  const handleProviderSelect = useCallback(
+    (next: LlmProvider) => {
+      if (next === aiProvider) return;
+      void setAiProvider(next);
+    },
+    [aiProvider, setAiProvider],
+  );
+
+  const handleModelSelect = useCallback(
+    (key: OnDeviceModelKey) => {
+      if (key === modelKey) return;
+      void setModelKey(key);
+    },
+    [modelKey, setModelKey],
+  );
+
+  const handleChatModeSelect = useCallback(
+    (mode: ChatResponseMode) => {
+      if (mode === chatMode) return;
+      void setChatMode(mode);
+    },
+    [chatMode, setChatMode],
+  );
 
   const sectionContent = useMemo(() => {
     if (activeSection === "Fragments") {
@@ -271,6 +327,89 @@ export const UserProfileScreen = () => {
           </TouchableOpacity>
           {saveMessage ? <Text style={styles.statusText}>{saveMessage}</Text> : null}
         </View>
+
+        <View style={styles.card}>
+          <Text style={styles.sectionLabel}>AI</Text>
+          <Text style={styles.sectionHeading}>Local assistant routing</Text>
+          <Text style={styles.helperText}>
+            Choose how Fragments answers non-command chat messages. Both options keep prompts fully local and request a
+            4K context window for better accuracy.
+          </Text>
+          <View style={styles.aiOptionGrid}>
+            {aiOptions.map((option) => {
+              const isActive = aiProvider === option.key;
+              return (
+                <TouchableOpacity
+                  key={option.key}
+                  style={[
+                    styles.aiOptionCard,
+                    isActive && styles.aiOptionCardActive,
+                    option.disabled && styles.aiOptionCardDisabled,
+                  ]}
+                  onPress={() => handleProviderSelect(option.key)}
+                  disabled={option.disabled}
+                >
+                  <Text style={styles.aiOptionLabel}>{option.title}</Text>
+                  <Text style={styles.aiOptionDescription}>{option.description}</Text>
+                  <Text style={styles.aiOptionFootnote}>{option.footnote}</Text>
+                  {isActive ? <Text style={styles.aiOptionBadge}>Selected</Text> : null}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+          {aiProvider === "openSource" ? (
+            <View style={styles.aiModelGrid}>
+              {Object.entries(ON_DEVICE_MODEL_MAP).map(([key, model]) => {
+                const typedKey = key as OnDeviceModelKey;
+                const isActive = modelKey === typedKey;
+                return (
+                  <TouchableOpacity
+                    key={key}
+                    style={[styles.aiOptionCard, isActive && styles.aiOptionCardActive]}
+                    onPress={() => handleModelSelect(typedKey)}
+                  >
+                    <Text style={styles.aiOptionLabel}>{model.label}</Text>
+                    <Text style={styles.aiOptionDescription}>{model.description}</Text>
+                    <Text style={styles.aiOptionFootnote}>
+                      {model.size} • {model.contextWindow.toLocaleString()} token window
+                    </Text>
+                    {isActive ? <Text style={styles.aiOptionBadge}>Selected</Text> : null}
+                  </TouchableOpacity>
+                );
+              })}
+              <Text style={styles.capsuleHint}>
+                Models download the first time you use the AI tab and live inside the device sandbox. Remove the app to
+                clear them.
+              </Text>
+            </View>
+          ) : (
+              <Text style={styles.helperText}>
+                Apple&apos;s path expects you to wire up AIPromptSession/CoreLLM (or a similar bridge) inside the native
+                project so prompts never leave the phone.
+              </Text>
+            )}
+          <View style={styles.responseModeBlock}>
+            <Text style={styles.sectionLabel}>Response length</Text>
+            <Text style={styles.helperText}>
+              Choose how verbose Local AI replies should be while chatting. Long answers request more on-device tokens.
+            </Text>
+            <View style={styles.responseModeRow}>
+              {Object.values(CHAT_RESPONSE_MODES).map((mode) => {
+                const isActive = chatMode === mode.key;
+                return (
+                  <TouchableOpacity
+                    key={mode.key}
+                    style={[styles.responseModePill, isActive && styles.responseModePillActive]}
+                    onPress={() => handleChatModeSelect(mode.key)}
+                  >
+                    <Text style={[styles.responseModeLabel, isActive && styles.responseModeLabelActive]}>{mode.label}</Text>
+                    <Text style={styles.responseModeDescription}>{mode.description}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        </View>
       </>
     );
   }, [
@@ -285,6 +424,13 @@ export const UserProfileScreen = () => {
     isSavingPrefs,
     saveMessage,
     prefsLoading,
+    aiOptions,
+    aiProvider,
+    handleProviderSelect,
+    handleModelSelect,
+    handleChatModeSelect,
+    modelKey,
+    chatMode,
   ]);
 
   return (
@@ -375,6 +521,95 @@ const styles = StyleSheet.create({
     marginTop: 8,
     fontSize: 14,
     color: "rgba(255,255,255,0.6)",
+  },
+  aiOptionGrid: {
+    marginTop: 16,
+    gap: 12,
+  },
+  aiModelGrid: {
+    marginTop: 16,
+    gap: 12,
+  },
+  aiOptionCard: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    borderRadius: 18,
+    padding: 16,
+    backgroundColor: "#0d1324",
+  },
+  aiOptionCardActive: {
+    borderColor: "#16a34a",
+    backgroundColor: "rgba(22,163,74,0.12)",
+  },
+  aiOptionCardDisabled: {
+    opacity: 0.5,
+  },
+  aiOptionLabel: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  aiOptionDescription: {
+    marginTop: 6,
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  aiOptionFootnote: {
+    marginTop: 2,
+    color: "rgba(255,255,255,0.55)",
+    fontSize: 12,
+  },
+  aiOptionBadge: {
+    marginTop: 10,
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    fontSize: 12,
+    color: "#16a34a",
+    borderWidth: 1,
+    borderColor: "rgba(22,163,74,0.6)",
+    fontWeight: "600",
+  },
+  capsuleHint: {
+    marginTop: 6,
+    fontSize: 12,
+    color: "rgba(255,255,255,0.55)",
+  },
+  codeText: {
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+  },
+  responseModeBlock: {
+    marginTop: 20,
+    gap: 8,
+  },
+  responseModeRow: {
+    flexDirection: "column",
+    gap: 10,
+    marginTop: 8,
+  },
+  responseModePill: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.15)",
+    borderRadius: 16,
+    padding: 12,
+  },
+  responseModePillActive: {
+    borderColor: "#0fb06a",
+    backgroundColor: "rgba(15,176,106,0.15)",
+  },
+  responseModeLabel: {
+    color: "rgba(255,255,255,0.8)",
+    fontWeight: "600",
+  },
+  responseModeLabelActive: {
+    color: "#0fb06a",
+  },
+  responseModeDescription: {
+    marginTop: 4,
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 13,
   },
   dropdownHeader: {
     flexDirection: "row",

@@ -1,11 +1,14 @@
 import * as Clipboard from "expo-clipboard";
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ComponentType } from "react";
 import {
+  ActivityIndicator,
   Alert,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -16,8 +19,10 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { useNavigation, type NavigationProp, type ParamListBase } from "@react-navigation/native";
 import { useHeaderHeight } from "@react-navigation/elements";
 import Ionicons from "@expo/vector-icons/Ionicons";
+import * as ImagePicker from "expo-image-picker";
 import { useCameraPermissions, type BarcodeScanningResult, type CameraViewProps } from "expo-camera";
 import type { EditableFood, NutrientKeys, NutrientSet, ServingFromDB } from "../types/food";
+import type { FoodCommandPayload, FoodServingInput, FoodLogCommandPayload } from "../types/commands";
 import type {
   RecipeDatabox,
   RecipeIngredient,
@@ -27,25 +32,60 @@ import type {
   RecipeStepIngredientUsage,
 } from "../types/recipes";
 import { useAuth } from "../providers/AuthProvider";
+import { useAiPreferences } from "../providers/AiPreferencesProvider";
+import { DEFAULT_ON_DEVICE_MODEL, ON_DEVICE_MODEL_MAP } from "../constants/onDeviceModels";
+import { CHAT_RESPONSE_MODES } from "../constants/aiConfig";
+import { orchestrateMessage } from "../orchestrator/orchestrateMessage";
+import type {
+  OrchestratorAttachment,
+  OrchestratorJobResult,
+  TextModelCallParams,
+  ToolName,
+  OrchestratorLogEntry,
+} from "../orchestrator/types";
 import { fetchAccessibleGroups } from "../utils/groups";
 import { supabase } from "../lib/supabaseClient";
 import { FoodEntryModal } from "../components/FoodEntryModal";
 import { TaskModal } from "../components/TaskModal";
+import { runAppleOnDeviceBridge, AppleOnDeviceError, type AppleBridgeMessage } from "../lib/appleOnDeviceBridge";
+import { useLLM, type Message as LlmMessage } from "react-native-executorch";
 
-type MessageAction = {
-  type: "food" | "recipe" | "task";
-  entryId: string;
-  label?: string;
-};
+type MessageAction =
+  | {
+      type: "food" | "recipe" | "task";
+      entryId: string;
+      label?: string;
+    }
+  | {
+      type: "command";
+      entryId: string;
+      label?: string;
+      command: string;
+    };
 
 type Message = {
   id: string;
-  role: "user" | "system";
+  role: "user" | "system" | "assistant";
   text: string;
   action?: MessageAction;
+  truncated?: boolean;
+  continuationOf?: string;
+  streaming?: boolean;
+  speaker?: string;
 };
 
-type CommandType = "help" | "addFood" | "addRecipe" | "addTask" | "logFood" | "ai";
+type AiThreadMessage = {
+  role: "user" | "system" | "assistant";
+  content: string;
+};
+
+const toLlmMessages = (conversation: AiThreadMessage[]): LlmMessage[] =>
+  conversation.map((entry) => ({
+    role: entry.role,
+    content: entry.content,
+  }));
+
+type CommandType = "help" | "addFood" | "addRecipe" | "addTask" | "logFood" | "ai" | "orchestratorDemo";
 
 type CommandBlueprint = {
   type: CommandType;
@@ -68,28 +108,6 @@ const NUTRIENT_KEYS: NutrientKeys[] = [
   "sugar_g",
   "sodium_mg",
 ];
-
-type FoodServingInput = {
-  id?: string;
-  label?: string;
-  amount?: string | number;
-  unit?: string;
-  nutrients?: Partial<Record<NutrientKeys, string | number>>;
-};
-
-type FoodCommandPayload = {
-  name: string;
-  bestBy?: string;
-  location?: string;
-  barcode?: string;
-  cost?: string | number;
-  groupId?: string;
-  groupName?: string;
-  imageUrl?: string;
-  photoUrl?: string;
-  catalogId?: string;
-  servings?: FoodServingInput[];
-};
 
 type FoodScratchpadEntry = {
   id: string;
@@ -180,28 +198,6 @@ type TaskScratchpadEntry = {
   createdAt: string;
 };
 
-type FoodLogManualInput = {
-  name: string;
-  imageUrl?: string;
-  groupName?: string;
-  servingLabel: string;
-  servingAmount?: string | number;
-  servingUnit?: string;
-  nutrients?: Partial<Record<NutrientKeys, string | number>>;
-};
-
-type FoodLogCommandPayload = {
-  mode?: "existing" | "manual";
-  foodId?: string;
-  servingId?: string;
-  groupId?: string;
-  groupName?: string;
-  loggedDate?: string;
-  quantity?: string | number;
-  notes?: string;
-  manual?: FoodLogManualInput;
-};
-
 const actionKey = (action: MessageAction) => `${action.type}-${action.entryId}`;
 
 const createId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -220,6 +216,61 @@ const toOptionalString = (value: unknown): string | undefined => {
   const text = typeof value === "string" ? value : String(value);
   const trimmed = text.trim();
   return trimmed.length ? trimmed : undefined;
+};
+
+const MACRO_DISPLAY_FIELDS: { key: NutrientKeys; label: string }[] = [
+  { key: "energy_kcal", label: "kcal" },
+  { key: "protein_g", label: "g protein" },
+  { key: "carbs_g", label: "g carbs" },
+  { key: "fat_g", label: "g fat" },
+  { key: "sugar_g", label: "g sugar" },
+  { key: "sodium_mg", label: "mg sodium" },
+];
+
+const summarizeNutrients = (nutrients?: Partial<Record<NutrientKeys, string | number>>) => {
+  if (!nutrients) return null;
+  const parts = MACRO_DISPLAY_FIELDS.map(({ key, label }) => {
+    const value = nutrients[key];
+    if (value === undefined || value === null || value === "") {
+      return null;
+    }
+    const asText = typeof value === "number" ? value.toString() : value;
+    if (!asText || !asText.toString().trim().length) {
+      return null;
+    }
+    return `${asText}${label.startsWith("g") || label.startsWith("mg") || label.startsWith("kcal") ? " " : ""}${label}`;
+  }).filter(Boolean);
+  return parts.length ? parts.join(", ") : null;
+};
+
+const summarizeAddCommand = (command: FoodCommandPayload) => {
+  const servingsCount = command.servings?.length ?? 0;
+  const servingsLabel = servingsCount
+    ? `${servingsCount} serving${servingsCount === 1 ? "" : "s"}`
+    : "No servings defined";
+  const location = command.location ?? "Pantry";
+  return [
+    `Pending pantry command: ${command.name ?? "Unnamed item"}`,
+    `${servingsLabel} at ${location}`,
+    "Tap to review & run /add food before saving.",
+  ].join("\n");
+};
+
+const summarizeLogCommand = (command: FoodLogCommandPayload) => {
+  const manual = command.manual;
+  const name = manual?.name ?? "Meal";
+  const quantity = command.quantity ?? "1";
+  const serving = manual?.servingLabel ?? "Serving";
+  const macros = summarizeNutrients(manual?.nutrients);
+  const macroLine = macros ? `Macros: ${macros}` : null;
+  return [
+    `Pending log command: ${name}`,
+    `${quantity} × ${serving}`,
+    macroLine,
+    "Tap to run /log food before inserting.",
+  ]
+    .filter(Boolean)
+    .join("\n");
 };
 
 const coalesceString = (...values: unknown[]): string | undefined => {
@@ -796,6 +847,19 @@ const COMMAND_RULES: Record<CommandType, string> = {
     "• Never add extra commentary or pre/post text when sharing.",
     "• Remind copilots that commands can be chained by sending one slash command per line.",
   ].join("\n"),
+  orchestratorDemo: [
+    "/orchestrator",
+    "• Runs the orchestrator demo that fakes two pantry images and builds /add food commands for each detected item.",
+    "• Use this to verify the on-device tool pipeline without uploading real photos.",
+  ].join("\n"),
+};
+
+const TOOL_LABELS: Record<ToolName, string> = {
+  vision: "Vision bot",
+  intentParser: "Intent Parser",
+  commandBuilder: "Command Builder",
+  jsonFixer: "JSON Fixer",
+  explanation: "Orchestrator",
 };
 
 const COMMAND_BLUEPRINTS: CommandBlueprint[] = [
@@ -836,6 +900,12 @@ const COMMAND_BLUEPRINTS: CommandBlueprint[] = [
     usage: "/ai",
     description: "Prints the full rulebook and copies it to the clipboard for other copilots.",
   },
+  {
+    type: "orchestratorDemo",
+    name: "/orchestrator",
+    usage: "/orchestrator",
+    description: "Runs the orchestrator demo that detects items from pantry photos and builds /add food commands.",
+  },
 ];
 
 const buildRulesPrompt = (groupLines: string[]) => {
@@ -867,14 +937,25 @@ const buildRulesPrompt = (groupLines: string[]) => {
   return sections.join("\n");
 };
 
-const createMessage = (text: string, role: Message["role"], action?: MessageAction): Message => ({
+const createMessage = (text: string, role: Message["role"], action?: MessageAction, speaker?: string): Message => ({
   id: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   role,
   text,
   action,
+  speaker,
 });
 
-const createSystemMessage = (text: string, action?: MessageAction) => createMessage(text, "system", action);
+const createSystemMessage = (text: string, action?: MessageAction, speaker?: string) =>
+  createMessage(text, "system", action, speaker);
+const createAssistantMessage = (text: string, speaker?: string) => createMessage(text, "assistant", undefined, speaker);
+const estimateTokenLength = (text: string) => {
+  const normalized = text.trim();
+  if (!normalized.length) return 0;
+  return Math.ceil(normalized.split(/\s+/).length * 1.3);
+};
+const detectTruncation = (text: string, maxTokens: number) => estimateTokenLength(text) >= maxTokens - 20;
+const CONTINUE_SYSTEM_PROMPT =
+  "Continue the previous response verbatim from the exact point it stopped. Do not repeat the earlier sentences, only finish the answer.";
 
 const INITIAL_MESSAGE = createSystemMessage(
   "Welcome to the Fragments AI console. Run /help to see the JSON-based slash commands."
@@ -885,6 +966,21 @@ const formatMeta = (values: (string | undefined)[]) => values.filter(Boolean).jo
 export const AiChatScreen = () => {
   const navigation = useNavigation<NavigationProp<ParamListBase>>();
   const { session } = useAuth();
+  const { provider: llmProvider, modelKey, chatMode } = useAiPreferences();
+  const selectedOnDeviceModel = ON_DEVICE_MODEL_MAP[modelKey] ?? ON_DEVICE_MODEL_MAP[DEFAULT_ON_DEVICE_MODEL];
+  const shouldLoadExecModel = llmProvider === "openSource";
+  const execLlm = useLLM({ model: selectedOnDeviceModel.resource, preventLoad: !shouldLoadExecModel });
+  const {
+    configure: execConfigure,
+    generate: execGenerate,
+    isReady: execReady,
+    isGenerating: execGenerating,
+    downloadProgress: execDownloadProgress,
+    error: execError,
+    response: execResponse,
+    messageHistory: execMessageHistory,
+    interrupt: execInterrupt,
+  } = execLlm;
   const insets = useSafeAreaInsets();
   const headerHeight = useHeaderHeight();
   const [messages, setMessages] = useState<Message[]>([INITIAL_MESSAGE]);
@@ -899,6 +995,18 @@ export const AiChatScreen = () => {
   const [taskModalVisible, setTaskModalVisible] = useState(false);
   const [actionStatuses, setActionStatuses] = useState<Record<string, boolean>>({});
   const activeActionRef = useRef<MessageAction | null>(null);
+  const [aiThread, setAiThread] = useState<AiThreadMessage[]>([]);
+  const aiThreadRef = useRef<AiThreadMessage[]>([]);
+  const appleAbortRef = useRef<AbortController | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
+  const streamingMessageIdRef = useRef<string | null>(null);
+  const assistantSourceRef = useRef<Record<string, { prompt: string; conversation: AiThreadMessage[] }>>({});
+  const [orchestratorRunning, setOrchestratorRunning] = useState(false);
+  const responseSettings = CHAT_RESPONSE_MODES[chatMode] ?? CHAT_RESPONSE_MODES.long;
+  const [pendingAttachments, setPendingAttachments] = useState<OrchestratorAttachment[]>([]);
+  const pendingAttachmentsRef = useRef<OrchestratorAttachment[]>([]);
   const cameraModuleRef = useRef<typeof import("expo-camera") | null>(null);
   const [scannerComponent, setScannerComponent] = useState<ComponentType<CameraViewProps> | null>(null);
   const [scannerVisible, setScannerVisible] = useState(false);
@@ -955,6 +1063,52 @@ export const AiChatScreen = () => {
     [groupOptions],
   );
 
+  const commandSummary = useMemo(() => buildRulesPrompt(groupLines), [groupLines]);
+  const orchestratorDefaults = useMemo(
+    () => ({
+      groupId: groupOptions[0]?.id,
+      groupName: groupOptions[0]?.name,
+      location: "Pantry",
+    }),
+    [groupOptions],
+  );
+  useEffect(() => {
+    pendingAttachmentsRef.current = pendingAttachments;
+  }, [pendingAttachments]);
+
+  const conversationalPrompt = useMemo(
+    () =>
+      [
+        "You are Fragments' offline assistant that runs locally on this device.",
+        "You do NOT execute commands yourself. Instead, explain the slash commands a user should run when structured actions are needed.",
+        "Follow the JSON contracts from /help when sharing sample commands, and keep replies concise.",
+        "Whenever you output an actionable command, it MUST start with '/', never with '!'.",
+        "Prefer returning commands directly like `/log food { ... }` instead of describing steps with prose.",
+        "Accessible groups:",
+        ...groupLines,
+      ].join("\n"),
+    [groupLines],
+  );
+
+  useEffect(() => {
+    if (!shouldLoadExecModel || !execReady) {
+      return;
+    }
+    execConfigure({
+      chatConfig: {
+        systemPrompt: conversationalPrompt,
+        contextWindowLength: selectedOnDeviceModel.contextWindow,
+        initialMessageHistory: [],
+      },
+    });
+  }, [conversationalPrompt, execConfigure, execReady, selectedOnDeviceModel.contextWindow, shouldLoadExecModel]);
+
+  useEffect(() => {
+    if (!shouldLoadExecModel) {
+      execInterrupt();
+    }
+  }, [execInterrupt, shouldLoadExecModel]);
+
   const addFoodEntry = useCallback((entry: FoodScratchpadEntry) => {
     setFoods((prev) => [entry, ...prev]);
   }, []);
@@ -967,7 +1121,219 @@ export const AiChatScreen = () => {
     setTasks((prev) => [entry, ...prev]);
   }, []);
 
-  const commandSummary = useMemo(() => buildRulesPrompt(groupLines), [groupLines]);
+  const execResponseRef = useRef("");
+  useEffect(() => {
+    execResponseRef.current = execResponse ?? "";
+  }, [execResponse]);
+  const syncAiThread = useCallback((next: AiThreadMessage[]) => {
+    aiThreadRef.current = next;
+    setAiThread(next);
+  }, []);
+
+  const updateMessage = useCallback((messageId: string, updater: (prev: Message) => Message) => {
+    setMessages((prev) => prev.map((message) => (message.id === messageId ? updater(message) : message)));
+  }, []);
+
+  const createAssistantPlaceholder = useCallback(() => {
+    const id = createId("assistant");
+    const placeholder: Message = { id, role: "assistant", text: "", streaming: true };
+    setMessages((prev) => [...prev, placeholder]);
+    return id;
+  }, []);
+
+  type LocalModelCallParams = {
+    conversation: AiThreadMessage[];
+    streamMessageId?: string | null;
+    maxTokens?: number;
+  };
+
+  const callLocalModel = useCallback(
+    async ({ conversation, streamMessageId = null, maxTokens }: LocalModelCallParams) => {
+      const tokenBudget = maxTokens ?? responseSettings.maxTokens;
+      const requestId = createId("llm");
+      const prefix = `[LLM:${requestId}]`;
+      console.log(`${prefix} provider=${llmProvider} maxTokens=${tokenBudget} messages=${conversation.length}`);
+      conversation.forEach((message, index) => {
+        console.log(`${prefix} [${index}] ${message.role.toUpperCase()}: ${message.content}`);
+      });
+      if (llmProvider === "apple") {
+        appleAbortRef.current?.abort();
+        const controller = new AbortController();
+        appleAbortRef.current = controller;
+        const response = await runAppleOnDeviceBridge({
+          messages: conversation as AppleBridgeMessage[],
+          signal: controller.signal,
+          maxOutputTokens: tokenBudget,
+        });
+        appleAbortRef.current = null;
+        const truncated = response.finishReason === "length";
+        console.log(`${prefix} RESPONSE finishReason=${response.finishReason} truncated=${truncated}`);
+        console.log(`${prefix} TEXT:\n${response.text}`);
+        return {
+          text: response.text,
+          truncated,
+        };
+      }
+      execResponseRef.current = "";
+      if (streamMessageId) {
+        setStreamingMessageId(streamMessageId);
+      }
+      try {
+        await execGenerate(toLlmMessages(conversation));
+      } finally {
+        if (streamMessageId) {
+          setStreamingMessageId(null);
+        }
+      }
+      const text = execResponseRef.current;
+      const truncated = detectTruncation(text, tokenBudget);
+      console.log(`${prefix} RESPONSE truncated=${truncated}`);
+      console.log(`${prefix} TEXT:\n${text}`);
+      return {
+        text,
+        truncated,
+      };
+    },
+    [llmProvider, responseSettings.maxTokens, execGenerate],
+  );
+
+  const callToolModel = useCallback(
+    async ({ systemPrompt, userPrompt, maxTokens, responseMode }: TextModelCallParams) => {
+      const system = responseMode === "json" ? `${systemPrompt}\nRespond with valid JSON only.` : systemPrompt;
+      const conversation: AiThreadMessage[] = [
+        { role: "system", content: system },
+        { role: "user", content: userPrompt },
+      ];
+      return callLocalModel({ conversation, maxTokens });
+    },
+    [callLocalModel],
+  );
+
+  const postStatus = useCallback((text: string) => {
+    setMessages((prev) => [...prev, createSystemMessage(text)]);
+  }, []);
+
+  const postToolMessage = useCallback((tool: ToolName, text: string, isError = false) => {
+    const label = TOOL_LABELS[tool] ?? tool;
+    setMessages((prev) => [...prev, createMessage(text, "system", undefined, label)]);
+    if (isError) {
+      setAiError(text);
+    }
+  }, []);
+
+  const queuePendingCommand = useCallback(
+    (commandText: string, summary: string, label: string) => {
+      const actionId = createId("pending");
+      setMessages((prev) => [
+        ...prev,
+        createSystemMessage(summary, { type: "command", entryId: actionId, label, command: commandText }, "Orchestrator"),
+      ]);
+    },
+    [],
+  );
+
+  const presentPendingCommands = useCallback(
+    (result: OrchestratorJobResult | null) => {
+      if (!result) return;
+      if (result.generatedCommands?.length) {
+        result.generatedCommands.forEach((command) => {
+          const summary = summarizeAddCommand(command);
+          queuePendingCommand(`/add food ${JSON.stringify(command)}`, summary, "Add to pantry");
+        });
+      }
+      if (result.generatedLogCommands?.length) {
+        result.generatedLogCommands.forEach((command) => {
+          const summary = summarizeLogCommand(command);
+          queuePendingCommand(`/log food ${JSON.stringify(command)}`, summary, "Log this meal");
+        });
+      }
+    },
+    [queuePendingCommand],
+  );
+
+  const handleAttachImage = useCallback(async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert("Permission needed", "Enable photo library access to attach images.");
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.8,
+    });
+    if (result.canceled || !result.assets?.length) {
+      return;
+    }
+    const first = result.assets[0];
+    if (!first.uri) return;
+    const attachment: OrchestratorAttachment = {
+      id: createId("photo"),
+      uri: first.uri,
+    };
+    setPendingAttachments((prev) => [...prev, attachment]);
+  }, []);
+
+  const handleRemoveAttachment = useCallback((id: string) => {
+    setPendingAttachments((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  const shouldUseOrchestrator = useCallback((text: string, attachmentsCount: number) => {
+    if (attachmentsCount > 0) return true;
+    const normalized = text.trim().toLowerCase();
+    const recipeIntent = /\b(recipe|instructions?|cook|cooking|how to make)\b/.test(normalized);
+    if (recipeIntent) {
+      return false;
+    }
+    if (normalized.startsWith("/orchestrator") || normalized.includes("put these in my pantry")) {
+      return true;
+    }
+    const logIntent = /\b(log|record|track|add)\b/.test(normalized);
+    const foodIntent = /\b(pizza|slice|piece|sandwich|meal|food|snack|drink|item|meal)\b/.test(normalized);
+    return logIntent && foodIntent;
+  }, []);
+
+  const buildDemoAttachments = useCallback(
+    (text: string): OrchestratorAttachment[] => {
+      if (!text.trim().startsWith("/orchestrator demo")) {
+        return [];
+      }
+      return [
+        {
+          id: createId("photo"),
+          debugDescription: "Photo of pantry shelf containing pasta, tomato sauce, and olive oil.",
+        },
+        {
+          id: createId("photo"),
+          debugDescription: "Image of spice rack with cumin, smoked paprika, sea salt, and pepper.",
+        },
+      ];
+    },
+    [],
+  );
+
+  useEffect(() => {
+    syncAiThread([]);
+    setAiError(null);
+    setAiBusy(false);
+  }, [llmProvider, modelKey, syncAiThread]);
+
+  useEffect(() => {
+    return () => {
+      appleAbortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    streamingMessageIdRef.current = streamingMessageId;
+  }, [streamingMessageId]);
+
+  useEffect(() => {
+    const targetId = streamingMessageIdRef.current;
+    if (!targetId) return;
+    setMessages((prev) =>
+      prev.map((message) => (message.id === targetId ? { ...message, text: execResponse ?? message.text } : message)),
+    );
+  }, [execResponse]);
 
   const handleFoodModalClose = useCallback(() => {
     setFoodModalVisible(false);
@@ -1150,6 +1516,76 @@ export const AiChatScreen = () => {
     [session?.user?.id],
   );
 
+  const handleOrchestratorJob = useCallback(
+    async (text: string, externalAttachments?: OrchestratorAttachment[]): Promise<OrchestratorJobResult | null> => {
+      setOrchestratorRunning(true);
+      if (!orchestratorDefaults.groupId) {
+        postStatus("Join or create a group before using the orchestrator demo.");
+        setOrchestratorRunning(false);
+        return null;
+      }
+      let attachments: OrchestratorAttachment[] =
+        externalAttachments && externalAttachments.length ? [...externalAttachments] : buildDemoAttachments(text);
+      const normalized = text.trim().toLowerCase();
+      if (!attachments.length && normalized.startsWith("/orchestrator") && !normalized.includes("demo")) {
+        attachments = [
+          {
+            id: createId("photo"),
+            debugDescription: "Simulated spice rack image (vision fallback).",
+          },
+        ];
+      }
+      if (attachments.length) {
+        postStatus(`Running vision on ${attachments.length} image${attachments.length === 1 ? "" : "s"}...`);
+      } else {
+        postStatus("Parsing your request for pantry actions...");
+      }
+      const historyMessages: AiThreadMessage[] = [...aiThreadRef.current, { role: "user", content: text }];
+      const recentHistory = historyMessages.slice(-8);
+      let serializedHistory = recentHistory.map((entry) => `${entry.role.toUpperCase()}: ${entry.content}`).join("\n");
+      if (serializedHistory.length > 4000) {
+        serializedHistory = serializedHistory.slice(serializedHistory.length - 4000);
+      }
+      try {
+        const result = await orchestrateMessage({
+          text,
+          history: serializedHistory,
+          attachments,
+          defaults: orchestratorDefaults,
+          callModel: callToolModel,
+          logger: (entry: OrchestratorLogEntry) => {
+            const heading = entry.step ?? entry.tool;
+            const clamp = (value?: string) => (value && value.length > 600 ? `${value.slice(0, 600)}...` : value);
+            const prompt = clamp(entry.promptPreview);
+            const output = clamp(entry.outputPreview);
+            if (prompt) {
+              postToolMessage(entry.tool, `${heading}\nPrompt:\n${prompt}`);
+            }
+            if (output) {
+              postToolMessage(entry.tool, `${heading}\nOutput:\n${output}`);
+            }
+            if (!prompt && !output && !entry.error) {
+              postToolMessage(entry.tool, heading);
+            }
+            if (entry.error) {
+              postToolMessage(entry.tool, `${heading}\nError: ${entry.error}`, true);
+            }
+          },
+        });
+        const failures = result.failures.length ? ` ${result.failures.length} item(s) failed validation.` : "";
+        postStatus(`${result.summary}${failures}`);
+        return result;
+      } catch (error) {
+        const friendly = error instanceof Error ? error.message : "Orchestrator failed.";
+        postStatus(friendly);
+        return null;
+      } finally {
+        setOrchestratorRunning(false);
+      }
+    },
+    [buildDemoAttachments, callToolModel, orchestratorDefaults, postStatus, postToolMessage],
+  );
+
   const processCommand = useCallback(
     async (rawInput: string): Promise<Message[]> => {
       const trimmed = rawInput.trim();
@@ -1250,6 +1686,9 @@ export const AiChatScreen = () => {
           if (parsed.error) {
             return [createSystemMessage(parsed.error)];
           }
+          if (!parsed.data) {
+            return [createSystemMessage("Log payload missing.")];
+          }
           const response = await handleLogFoodCommand(parsed.data);
           return [response];
         }
@@ -1258,34 +1697,30 @@ export const AiChatScreen = () => {
           await Clipboard.setStringAsync(prompt);
           return [createSystemMessage(prompt)];
         }
+        case "orchestratorDemo": {
+          const result = await handleOrchestratorJob("/orchestrator", pendingAttachmentsRef.current);
+          setPendingAttachments([]);
+          presentPendingCommands(result);
+          return [];
+        }
         default:
           return [createSystemMessage("That command exists but is not implemented yet.")];
       }
     },
-    [addFoodEntry, addRecipeEntry, addTaskEntry, commandSummary, groupLines, handleLogFoodCommand],
+    [
+      addFoodEntry,
+      addRecipeEntry,
+      addTaskEntry,
+      commandSummary,
+      groupLines,
+      handleLogFoodCommand,
+      handleOrchestratorJob,
+      presentPendingCommands,
+    ],
   );
 
-  const handleSend = useCallback(async () => {
-    const trimmed = input.trim();
-    if (!trimmed) return;
-    const userMessage = createMessage(trimmed, "user");
-    setMessages((prev) => [...prev, userMessage]);
-    setInput("");
-    const commandSegments = splitCommands(trimmed);
-    const aggregatedResponses: Message[] = [];
-    for (const segment of commandSegments) {
-      const responses = await processCommand(segment);
-      if (responses.length) {
-        aggregatedResponses.push(...responses);
-      }
-    }
-    if (aggregatedResponses.length) {
-      setMessages((prev) => [...prev, ...aggregatedResponses]);
-    }
-  }, [input, processCommand]);
-
   const handleActionPress = useCallback(
-    (action: MessageAction) => {
+    async (action: MessageAction) => {
       activeActionRef.current = action;
       if (action.type === "food") {
         const entry = foods.find((item) => item.id === action.entryId);
@@ -1311,16 +1746,194 @@ export const AiChatScreen = () => {
             groupId: entry.groupId ?? null,
             initialRecipe: convertRecipeEntryToDraft(entry),
           });
+        return;
+      }
+      if (action.type === "command") {
+        const responses = await processCommand(action.command);
+        if (responses.length) {
+          setMessages((prev) => [...prev, ...responses]);
+        }
+        markActionComplete(action);
       }
     },
-    [foods, tasks, recipes, navigation],
+    [foods, tasks, recipes, navigation, processCommand, setMessages, markActionComplete],
   );
+
+  const executeCommandsFromText = useCallback(
+    async (text: string) => {
+      const segments = splitCommands(text)
+        .map((segment) => segment.replace(/^`+|`+$/g, "").trim())
+        .filter((segment) => segment.startsWith("/"));
+      for (const command of segments) {
+        const responses = await processCommand(command);
+        if (responses.length) {
+          setMessages((prev) => [...prev, ...responses]);
+        }
+      }
+    },
+    [processCommand],
+  );
+
+  const runChatTurn = useCallback(
+    async (text: string, conversation: AiThreadMessage[]) => {
+      setAiBusy(true);
+      setAiError(null);
+      if (llmProvider === "openSource" && !execReady) {
+        setMessages((prev) => [
+          ...prev,
+          createSystemMessage("Model is still warming up. Keep this tab open until the download completes."),
+        ]);
+        setAiBusy(false);
+        return;
+      }
+      const placeholderId = createAssistantPlaceholder();
+      assistantSourceRef.current[placeholderId] = {
+        prompt: text,
+        conversation,
+      };
+      try {
+        const callConversation: AiThreadMessage[] = [{ role: "system", content: conversationalPrompt }, ...conversation];
+        const result = await callLocalModel({
+          conversation: callConversation,
+          streamMessageId: placeholderId,
+        });
+        const assistantTurn: AiThreadMessage = { role: "assistant", content: result.text };
+        const nextHistory = [...conversation, assistantTurn];
+        syncAiThread(nextHistory);
+        updateMessage(placeholderId, (msg) => ({
+          ...msg,
+          text: result.text,
+          streaming: false,
+          truncated: result.truncated,
+        }));
+        await executeCommandsFromText(result.text);
+      } catch (error) {
+        console.error("Local AI error", error);
+        const friendly = error instanceof Error ? error.message : "Local model request failed.";
+        setAiError(friendly);
+        updateMessage(placeholderId, () => createSystemMessage(friendly));
+      } finally {
+        setAiBusy(false);
+        if (streamingMessageIdRef.current === placeholderId) {
+          setStreamingMessageId(null);
+        }
+      }
+    },
+    [
+      callLocalModel,
+      conversationalPrompt,
+      createAssistantPlaceholder,
+      execReady,
+      llmProvider,
+      shouldLoadExecModel,
+      syncAiThread,
+      updateMessage,
+      executeCommandsFromText,
+    ],
+  );
+
+  const handleContinuePress = useCallback(
+    async (messageId: string) => {
+      const source = assistantSourceRef.current[messageId];
+      const target = messages.find((message) => message.id === messageId);
+      if (!source || !target) {
+        return;
+      }
+      setAiBusy(true);
+      try {
+        const history: AiThreadMessage[] = [
+          ...source.conversation,
+          { role: "assistant", content: target.text },
+          { role: "user", content: "Continue from the exact point where you stopped." },
+        ];
+        const callConversation: AiThreadMessage[] = [{ role: "system", content: CONTINUE_SYSTEM_PROMPT }, ...history];
+        const result = await callLocalModel({
+          conversation: callConversation,
+          maxTokens: responseSettings.maxTokens,
+        });
+        updateMessage(messageId, (message) => ({
+          ...message,
+          text: `${message.text}${message.text.endsWith("\n") ? "" : "\n"}${result.text}`.trim(),
+          truncated: result.truncated,
+        }));
+        assistantSourceRef.current[messageId] = {
+          prompt: source.prompt,
+          conversation: history.slice(0, -1),
+        };
+        await executeCommandsFromText(result.text);
+      } catch (error) {
+        const friendly = error instanceof Error ? error.message : "Unable to continue that response.";
+        setAiError(friendly);
+        postStatus(friendly);
+      } finally {
+        setAiBusy(false);
+      }
+    },
+    [callLocalModel, executeCommandsFromText, messages, postStatus, responseSettings.maxTokens, updateMessage],
+  );
+
+  const handleSend = useCallback(async () => {
+    const trimmed = input.trim();
+    if (!trimmed) return;
+    const userMessage = createMessage(trimmed, "user");
+    setMessages((prev) => [...prev, userMessage]);
+    setInput("");
+    if (!trimmed.startsWith("/")) {
+      if (aiBusy || execGenerating) {
+        setMessages((prev) => [
+          ...prev,
+          createSystemMessage("Local model is still responding. Wait for it to finish before sending another prompt."),
+        ]);
+        return;
+      }
+      if (shouldUseOrchestrator(trimmed, pendingAttachments.length)) {
+        const result = await handleOrchestratorJob(trimmed, pendingAttachments);
+        setPendingAttachments([]);
+        presentPendingCommands(result);
+        return;
+      }
+      const userHistory: AiThreadMessage[] = [...aiThreadRef.current, { role: "user", content: trimmed }];
+      await runChatTurn(trimmed, userHistory);
+      return;
+    }
+    const commandSegments = splitCommands(trimmed);
+    const aggregatedResponses: Message[] = [];
+    for (const segment of commandSegments) {
+      const responses = await processCommand(segment);
+      if (responses.length) {
+        aggregatedResponses.push(...responses);
+      }
+    }
+    if (aggregatedResponses.length) {
+      setMessages((prev) => [...prev, ...aggregatedResponses]);
+    }
+  }, [
+    aiBusy,
+    execGenerating,
+    handleOrchestratorJob,
+    input,
+    pendingAttachments.length,
+    presentPendingCommands,
+    processCommand,
+    runChatTurn,
+    shouldUseOrchestrator,
+  ]);
 
   const tipHeader = useMemo(
     () => <Text style={styles.tipText}>Use /help if you need the slash commands.</Text>,
     [],
   );
   const Scanner = scannerComponent;
+  const downloadPercent = Math.round(execDownloadProgress * 100);
+  const showDownloadStatus = shouldLoadExecModel && !execReady;
+  const showThinking = aiBusy || execGenerating;
+  const normalizedExecError =
+    execError && typeof execError === "object" && "message" in execError
+      ? String((execError as Error).message)
+      : execError
+        ? String(execError)
+        : null;
+  const statusError = aiError ?? (shouldLoadExecModel ? normalizedExecError : null);
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["left", "right"]}>
@@ -1337,9 +1950,22 @@ export const AiChatScreen = () => {
               const action = item.action;
               const buttonKey = action ? actionKey(action) : null;
               const isDone = buttonKey ? actionStatuses[buttonKey] : false;
+              const bubbleStyle =
+                item.role === "user"
+                  ? styles.userBubble
+                  : item.role === "assistant"
+                      ? styles.assistantBubble
+                      : styles.systemBubble;
+              const authorLabel = item.speaker
+                ? item.speaker
+                : item.role === "user"
+                    ? "You"
+                    : item.role === "assistant"
+                        ? "Local AI"
+                        : "System";
               return (
-                <View style={[styles.messageBubble, item.role === "user" ? styles.userBubble : styles.systemBubble]}>
-                  <Text style={styles.messageMeta}>{item.role === "user" ? "You" : "System"}</Text>
+                <View style={[styles.messageBubble, bubbleStyle]}>
+                  <Text style={styles.messageMeta}>{authorLabel}</Text>
                   <Text style={styles.messageText}>{item.text}</Text>
                   {action ? (
                     <TouchableOpacity
@@ -1349,6 +1975,11 @@ export const AiChatScreen = () => {
                       <Text style={[styles.messageActionText, isDone && styles.messageActionDoneText]}>
                         {isDone ? "Done. Add again?" : action.label ?? "Review & confirm"}
                       </Text>
+                    </TouchableOpacity>
+                  ) : null}
+                  {item.role === "assistant" && item.truncated ? (
+                    <TouchableOpacity style={styles.continueButton} onPress={() => handleContinuePress(item.id)}>
+                      <Text style={styles.continueButtonText}>Continue</Text>
                     </TouchableOpacity>
                   ) : null}
                 </View>
@@ -1361,9 +1992,37 @@ export const AiChatScreen = () => {
             keyboardShouldPersistTaps="handled"
           />
 
+          {pendingAttachments.length ? (
+            <ScrollView
+              horizontal
+              style={styles.attachmentBar}
+              contentContainerStyle={styles.attachmentContent}
+              showsHorizontalScrollIndicator={false}
+            >
+              {pendingAttachments.map((attachment) => (
+                <View key={attachment.id} style={styles.attachmentThumb}>
+                  {attachment.uri ? (
+                    <Image source={{ uri: attachment.uri }} style={styles.attachmentImage} />
+                  ) : (
+                    <Text style={styles.attachmentLabel}>Attachment</Text>
+                  )}
+                  <TouchableOpacity
+                    style={styles.attachmentRemove}
+                    onPress={() => handleRemoveAttachment(attachment.id)}
+                  >
+                    <Ionicons name="close" size={12} color="#ffffff" />
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </ScrollView>
+          ) : null}
+
           <View style={[styles.inputRow, { paddingBottom: Math.max(10, insets.bottom + 4) }]}>
             <TouchableOpacity style={styles.inputIconButton} onPress={handleOpenScanner}>
               <Ionicons name="barcode-outline" size={20} color="rgba(255,255,255,0.9)" />
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.inputIconButton} onPress={handleAttachImage}>
+              <Ionicons name="image-outline" size={20} color="rgba(255,255,255,0.9)" />
             </TouchableOpacity>
             <TextInput
               value={input}
@@ -1379,6 +2038,32 @@ export const AiChatScreen = () => {
               <Text style={styles.sendLabel}>Send</Text>
             </TouchableOpacity>
           </View>
+          {showDownloadStatus || showThinking || statusError || orchestratorRunning ? (
+            <View style={styles.modelStatusRow}>
+              {showDownloadStatus ? (
+                <Text style={styles.modelStatusText}>
+                  Downloading {selectedOnDeviceModel.label} • {Math.min(100, Math.max(0, downloadPercent))}%
+                </Text>
+              ) : null}
+              {showThinking ? (
+                <View style={styles.modelStatusInline}>
+                  <ActivityIndicator size="small" color="#0fb06a" style={styles.modelStatusSpinner} />
+                  <Text style={styles.modelStatusText}>Local model is thinking…</Text>
+                </View>
+              ) : null}
+              {statusError ? (
+                <Text style={[styles.modelStatusText, styles.modelStatusError]}>{statusError}</Text>
+              ) : null}
+              {orchestratorRunning ? (
+                <Text style={styles.modelStatusText}>Running orchestrator workflow…</Text>
+              ) : null}
+              {llmProvider === "apple" ? (
+                <Text style={styles.modelStatusHint}>
+                  Apple option expects an on-device bridge that forwards to AIPromptSession/CoreLLM.
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       </KeyboardAvoidingView>
 
@@ -1456,6 +2141,13 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.08)",
     maxWidth: "95%",
   },
+  assistantBubble: {
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(15,176,106,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(15,176,106,0.35)",
+    maxWidth: "95%",
+  },
   messageMeta: {
     fontSize: 11,
     textTransform: "uppercase",
@@ -1487,6 +2179,20 @@ const styles = StyleSheet.create({
   },
   messageActionDoneText: {
     color: "#16a34a",
+  },
+  continueButton: {
+    marginTop: 6,
+    alignSelf: "flex-start",
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.2)",
+  },
+  continueButtonText: {
+    color: "#0fb06a",
+    fontWeight: "600",
+    fontSize: 12,
   },
   messageListContent: {
     paddingTop: 24,
@@ -1530,6 +2236,68 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontWeight: "600",
     fontSize: 15,
+  },
+  modelStatusRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    flexWrap: "wrap",
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+  },
+  modelStatusInline: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  modelStatusSpinner: {
+    marginRight: 2,
+  },
+  modelStatusText: {
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 13,
+  },
+  modelStatusError: {
+    color: "#f97316",
+  },
+  modelStatusHint: {
+    color: "rgba(255,255,255,0.45)",
+    fontSize: 12,
+  },
+  attachmentBar: {
+    maxHeight: 90,
+    marginBottom: 6,
+  },
+  attachmentContent: {
+    gap: 8,
+    paddingHorizontal: 4,
+  },
+  attachmentThumb: {
+    width: 70,
+    height: 70,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.2)",
+    overflow: "hidden",
+    position: "relative",
+  },
+  attachmentImage: {
+    width: "100%",
+    height: "100%",
+  },
+  attachmentLabel: {
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 11,
+    textAlign: "center",
+    marginTop: 24,
+  },
+  attachmentRemove: {
+    position: "absolute",
+    top: 4,
+    right: 4,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    borderRadius: 999,
+    padding: 3,
   },
   scannerModal: {
     flex: 1,

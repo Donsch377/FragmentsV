@@ -4,6 +4,7 @@ import { StatusBar } from "expo-status-bar";
 import { LogBox } from "react-native";
 import { AuthProvider } from "./app/providers/AuthProvider";
 import { AppNavigator } from "./app/navigation/AppNavigator";
+import { AiPreferencesProvider } from "./app/providers/AiPreferencesProvider";
 
 const freshTheme = {
   ...DefaultTheme,
@@ -23,10 +24,12 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <AuthProvider>
-        <NavigationContainer theme={freshTheme}>
-          <AppNavigator />
-          <StatusBar style="light" />
-        </NavigationContainer>
+        <AiPreferencesProvider>
+          <NavigationContainer theme={freshTheme}>
+            <AppNavigator />
+            <StatusBar style="light" />
+          </NavigationContainer>
+        </AiPreferencesProvider>
       </AuthProvider>
     </SafeAreaProvider>
   );

@@ -62,6 +62,13 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=<ANON_KEY from fragments-supabase/.env or Supabase
 
 Adjust these values if you change the local Supabase URL or keys.
 
+On-device AI via ExecuTorch does not require extra env vars. If you are wiring up an Apple Intelligence bridge, point these to your local HTTP shim:
+
+```env
+EXPO_PUBLIC_APPLE_LLM_URL=http://127.0.0.1:17890/v1/chat/completions
+EXPO_PUBLIC_APPLE_LLM_MODEL=apple-intelligence-preview
+```
+
 3. **Run the app**
 
 From `FragmentsV/`:
@@ -189,9 +196,25 @@ FragmentsV/
     - `Calendar` • `Pantry` • **center `AI` tab** • `Groups` • `Map`.
   - AI tab:
     - Uses a custom fragments‑style icon whose pieces “snap together” when focused.
-    - Currently hosts `AiChatScreen` with placeholder content, ready for future AI‑driven group/pantry helpers.
+    - Hosts `AiChatScreen`, which now runs Meta/Qwen 4K models directly on the device via `react-native-executorch` (first use downloads the weights) while keeping slash commands intact. Responses stream live, expose a “Continue” action when truncated, and respect the **Short/Long** toggle in Profile ▸ Settings ▸ AI.
   - Map tab:
     - `MapScreen` placeholder for future location‑aware features (e.g., nearby stores or shared pantries).
+
+- **Local LLM routing**
+  - User profile → **Settings → AI** switches between ExecuTorch-downloaded models and an optional Apple Intelligence bridge.
+  - The ExecuTorch option fetches Meta/Qwen `.pte` weights from Software Mansion’s HuggingFace mirror (≈0.8–2 GB) and keeps them inside the device sandbox with a 4K window.
+  - The Apple option expects an OpenAI-style HTTP shim around `AIPromptSession`/CoreLLM on iOS 18+; configure its URL with `EXPO_PUBLIC_APPLE_LLM_URL`.
+  - `scripts/local-llm/README.md` now documents the ExecuTorch requirements (new architecture build, disk usage) and how to stand up the Apple shim inside your native project.
+
+### Local AI orchestrator & continue support
+
+- Send `/orchestrator` (or `/orchestrator demo`) inside the Local AI chat, attach a pantry photo, or simply say “log a pizza for me” to trigger the on-device orchestrator. It now surfaces each tool’s **prompt and output** in the chat (Intent Parser, Vision, Command Builder, JSON Fixer) plus an explicit JSON “plan” from the Orchestrator bot so you can watch the workflow fan out.
+- Until the real vision stack is wired up, the orchestrator intentionally ignores the raw vision output and injects four hard-coded seasonings (Sea Salt, Smoked Paprika, Garlic Powder, Cumin). This guarantees the downstream Command Builder + Zod validation flow can be tested even if the ExecuTorch/Apple bridge struggles with image reasoning.
+- When no photos are attached, the new **Intent Parser** tool turns the user’s sentence into detected pantry items (respecting calories, protein, etc.) so text-only requests no longer trigger the generic seasoning demo.
+- If the user explicitly asks to “log” something, the orchestrator now builds `/log food { ... }` payloads with the detected calories/macros so meal tracking works end-to-end; pantry-style requests still go through `/add food`.
+- Both `/add food` and `/log food` commands now appear as pending system bubbles with a “Run” button so nothing touches the pantry or log until you explicitly confirm.
+- Assistant replies stream token-by-token on ExecuTorch (and the Apple shim) and now flag truncation more reliably. The built-in “Continue” button sends an explicit “Continue the last response verbatim…” prompt so long answers can spill over the configured 4K window without losing context.
+- All tool calls go through the same `callLocalModel` abstraction that powers chat, so whichever on-device LLM you pick (ExecuTorch `.pte` weights or the Apple bridge) is responsible for honoring the ~4K window, streaming, and JSON-only constraints enforced by the orchestrator prompts.
 
 ## Supabase data (high‑level)
 
@@ -216,4 +239,3 @@ npm run test
 ```
 
 Most current work is UI‑ and integration‑focused, so tests are light and can be expanded as the data model stabilizes.
-

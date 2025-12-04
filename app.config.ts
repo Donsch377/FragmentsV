@@ -16,6 +16,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   },
   ios: {
     supportsTablet: true,
+    bundleIdentifier: "com.dschell.fragments",
   },
   android: {
     adaptiveIcon: {
@@ -23,6 +24,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       backgroundColor: "#050505",
     },
     edgeToEdgeEnabled: true,
+    package: "com.dschell.fragments",
   },
   web: {
     favicon: "./assets/favicon.png",
