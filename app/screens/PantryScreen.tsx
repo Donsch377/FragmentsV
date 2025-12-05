@@ -621,7 +621,7 @@ export const PantryScreen = () => {
                 style={styles.groupSelector}
                 onPress={() => setShowGroupMenu((prev) => !prev)}
               >
-                <Text style={styles.groupSelectorText}>
+                <Text style={styles.groupSelectorText} numberOfLines={1} ellipsizeMode="tail">
                   {selectedGroupName || groupOptions[0]?.name || "your"} pantry
                 </Text>
                 <Text style={styles.groupSelectorCaret}>{showGroupMenu ? "▲" : "▼"}</Text>
@@ -1073,7 +1073,7 @@ export const PantryScreen = () => {
                 </TouchableOpacity>
               </View>
 
-              <ScrollView contentContainerStyle={styles.detailScroll}>
+              <ScrollView style={styles.detailScrollArea} contentContainerStyle={styles.detailScroll}>
                 <View style={styles.detailSection}>
                   <Text style={styles.sectionTitle}>Prep details</Text>
                   <Text style={styles.sectionBody}>
@@ -1381,10 +1381,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
+    flexShrink: 1,
+    maxWidth: "65%",
   },
   groupSelectorText: {
     color: "#ffffff",
     fontWeight: "600",
+    flexShrink: 1,
   },
   groupSelectorCaret: {
     color: "rgba(255,255,255,0.6)",
@@ -1521,6 +1524,19 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 24,
     gap: 16,
+  },
+  detailScrollWrapper: {
+    flex: 1,
+    minHeight: 0,
+  },
+  detailScrollArea: {
+    flex: 1,
+  },
+  detailCloseRow: {
+    alignItems: "flex-end",
+    paddingHorizontal: 24,
+    paddingTop: 12,
+    paddingBottom: 4,
   },
   detailSection: {
     gap: 8,

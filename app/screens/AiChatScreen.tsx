@@ -31,6 +31,17 @@ import type {
   RecipeStepDataboxValue,
   RecipeStepIngredientUsage,
 } from "../types/recipes";
+import {
+  CommandType,
+  CONTINUE_SYSTEM_PROMPT,
+  FOOD_COMMAND_TEMPLATE,
+  FOOD_LOG_COMMAND_TEMPLATE,
+  INITIAL_SYSTEM_GREETING,
+  RECIPE_COMMAND_TEMPLATE,
+  TASK_COMMAND_TEMPLATE,
+  buildRulesPrompt,
+  createConversationalPrompt,
+} from "../prompts/aiPrompts";
 import { useAuth } from "../providers/AuthProvider";
 import { useAiPreferences } from "../providers/AiPreferencesProvider";
 import { DEFAULT_ON_DEVICE_MODEL, ON_DEVICE_MODEL_MAP } from "../constants/onDeviceModels";
@@ -79,13 +90,20 @@ type AiThreadMessage = {
   content: string;
 };
 
+const noop = () => {};
+const asyncNoop = async () => {};
+
+type NavigatorClipboard = {
+  clipboard?: {
+    writeText?: (value: string) => Promise<void>;
+  };
+};
+
 const toLlmMessages = (conversation: AiThreadMessage[]): LlmMessage[] =>
   conversation.map((entry) => ({
     role: entry.role,
     content: entry.content,
   }));
-
-type CommandType = "help" | "addFood" | "addRecipe" | "addTask" | "logFood" | "ai" | "orchestratorDemo";
 
 type CommandBlueprint = {
   type: CommandType;
@@ -624,319 +642,6 @@ const convertRecipeEntryToDraft = (entry: RecipeScratchpadEntry) => ({
   databoxes: entry.databoxes,
 });
 
-const FOOD_COMMAND_TEMPLATE = `/add food {
-  "name": "REQUIRED — string",
-  "bestBy": "OPTIONAL — YYYY-MM-DD",
-  "location": "OPTIONAL — string",
-  "barcode": "OPTIONAL — string",
-  "cost": "OPTIONAL — number as string",
-  "groupId": "REQUIRED — UUID from accessible groups",
-  "groupName": "OPTIONAL — display name for that group",
-  "catalogId": "OPTIONAL — catalog reference",
-  "imageUrl": "OPTIONAL — image URL",
-  "servings": [
-    {
-      "id": "REQUIRED — unique string",
-      "label": "REQUIRED — display name",
-      "amount": "REQUIRED — number as string",
-      "unit": "REQUIRED — string",
-      "nutrients": {
-        "energy_kcal": "REQUIRED — number as string",
-        "protein_g": "REQUIRED — number as string",
-        "carbs_g": "REQUIRED — number as string",
-        "fat_g": "REQUIRED — number as string",
-        "sat_fat_g": "REQUIRED — number as string",
-        "trans_fat_g": "REQUIRED — number as string",
-        "fiber_g": "REQUIRED — number as string",
-        "sugar_g": "REQUIRED — number as string",
-        "sodium_mg": "REQUIRED — number as string"
-      }
-    }
-  ]
-}`;
-
-const RECIPE_COMMAND_TEMPLATE = `/add recipe {
-  "title": "REQUIRED — string",
-  "prepTimeMinutes": "OPTIONAL — number",
-  "cookTimeMinutes": "OPTIONAL — number",
-  "servings": "OPTIONAL — number",
-  "groupId": "REQUIRED — UUID from accessible groups",
-  "groupName": "OPTIONAL — display label",
-  "ingredients": [
-    {
-      "id": "REQUIRED — unique string",
-      "label": "REQUIRED — ingredient name",
-      "amount": "OPTIONAL — string",
-      "unit": "OPTIONAL — string",
-      "linkedFoodId": "OPTIONAL — pantry id"
-    }
-  ],
-  "steps": [
-    {
-      "id": "REQUIRED — unique string",
-      "summary": "REQUIRED — step description",
-      "notes": "OPTIONAL — string",
-      "requires": ["OPTIONAL — preceding step ids"],
-      "ingredientUsages": [
-        { "ingredientId": "REQUIRED", "amount": "OPTIONAL" }
-      ],
-      "databoxValues": [
-        { "databoxId": "REQUIRED", "value": "OPTIONAL expression" }
-      ]
-    }
-  ],
-  "nutrition": [
-    { "id": "REQUIRED", "key": "REQUIRED", "label": "REQUIRED", "unit": "REQUIRED", "estimatedValue": "REQUIRED" }
-  ],
-  "databoxes": [
-    { "id": "REQUIRED", "label": "REQUIRED", "defaultValue": "REQUIRED", "expression": "OPTIONAL formula" }
-  ]
-}`;
-
-const TASK_COMMAND_TEMPLATE = `/add task {
-  "title": "REQUIRED — string",
-  "notes": "OPTIONAL — string",
-  "startDate": "OPTIONAL — YYYY-MM-DD",
-  "startTime": "OPTIONAL — HH:MM",
-  "dueDate": "OPTIONAL — YYYY-MM-DD",
-  "dueTime": "OPTIONAL — HH:MM",
-  "groupId": "REQUIRED — UUID from accessible groups",
-  "groupName": "OPTIONAL — display label",
-  "link": {
-    "text": "OPTIONAL — freeform context",
-    "pantryId": "OPTIONAL — pantry id",
-    "recipeId": "OPTIONAL — recipe id"
-  },
-  "assignees": ["OPTIONAL — list of display names"]
-}`;
-
-const FOOD_LOG_COMMAND_TEMPLATE = `/log food {
-  "mode": "existing | manual",
-  "groupId": "OPTIONAL — defaults to the pantry group when mode=existing",
-  "groupName": "OPTIONAL — label for the group",
-  "loggedDate": "OPTIONAL — YYYY-MM-DD (defaults to today)",
-  "quantity": "OPTIONAL — number or string (defaults to 1)",
-  "notes": "OPTIONAL — string",
-  "foodId": "REQUIRED when mode=existing — pantry food UUID",
-  "servingId": "OPTIONAL when mode=existing — pantry serving UUID",
-  "manual": {
-    "name": "REQUIRED when mode=manual",
-    "imageUrl": "OPTIONAL",
-    "groupName": "OPTIONAL — overrides top-level groupName",
-    "servingLabel": "REQUIRED when mode=manual",
-    "servingAmount": "OPTIONAL — number or string",
-    "servingUnit": "OPTIONAL",
-    "nutrients": {
-      "energy_kcal": "OPTIONAL string or number",
-      "protein_g": "... other nutrient keys ...",
-      "carbs_g": "",
-      "fat_g": "",
-      "sat_fat_g": "",
-      "trans_fat_g": "",
-      "fiber_g": "",
-      "sugar_g": "",
-      "sodium_mg": ""
-    }
-  }
-}`;
-
-const GENERAL_RULE_LINES = [
-  "Fragments AI Command Rules (v2)",
-  "",
-  "General",
-  "• Every /add command must be followed by exactly one valid JSON object.",
-  "• NEVER use smart / curly quotes. Use only plain ASCII double quotes: \".",
-  "• Bad: “name”",
-  "• Good: \"name\"",
-  "• Do not add comments inside the JSON.",
-  "• Do not include trailing commas.",
-  "• If you don’t know a value for an optional field, omit the field entirely instead of using an empty string.",
-  "• All numbers must be sent as strings (for example \"140\", not 140), unless otherwise specified.",
-];
-
-const COMMAND_RULES: Record<CommandType, string> = {
-  help: [
-    "/help (alias /commands)",
-    "• Returns a concise summary of every slash command.",
-    "• Use whenever you need a refresher during a conversation.",
-  ].join("\n"),
-  addFood: [
-    "/add food",
-    "",
-    "Immediately after /add food output only a JSON object with this shape:",
-    FOOD_COMMAND_TEMPLATE,
-    "Rules for /add food:",
-    "• name and groupId are always required.",
-    "• servings must contain at least one serving object.",
-    "• id should be a stable unique ID for that serving in the context of this item (e.g. \"coke-12oz-1\").",
-    "• If a value is unknown for bestBy, location, barcode, cost, groupName, catalogId, or imageUrl, simply omit that key from the JSON.",
-    "• All nutrient values are strings representing numbers (e.g. \"0\", \"39\", \"140\").",
-    "",
-    "Output format example (valid):",
-    "",
-    "/add food {",
-    '  "name": "Coca-Cola (Can)",',
-    '  "bestBy": "2026-12-31",',
-    '  "location": "Pantry",',
-    '  "barcode": "04963406",',
-    '  "cost": "0.75",',
-    '  "groupId": "2f4a1ca4-fbcf-4091-8cd5-5d6ec8e5fa66",',
-    '  "groupName": "Solo",',
-    '  "servings": [',
-    "    {",
-    '      "id": "coke-12oz-1",',
-    '      "label": "1 can (12 fl oz)",',
-    '      "amount": "355",',
-    '      "unit": "ml",',
-    '      "nutrients": {',
-    '        "energy_kcal": "140",',
-    '        "protein_g": "0",',
-    '        "carbs_g": "39",',
-    '        "fat_g": "0",',
-    '        "sat_fat_g": "0",',
-    '        "trans_fat_g": "0",',
-    '        "fiber_g": "0",',
-    '        "sugar_g": "39",',
-    '        "sodium_mg": "45"',
-    "      }",
-    "    }",
-    "  ]",
-    "}",
-    "",
-    "• No explanations before or after.",
-    "• No backticks in the actual command the system will parse.",
-    "• Only the /add food prefix followed by that single JSON object.",
-  ].join("\n"),
-  addRecipe: [
-    "/add recipe",
-    "",
-    "Immediately after /add recipe output only a JSON object with this structure:",
-    RECIPE_COMMAND_TEMPLATE,
-    "Rules for /add recipe:",
-    "• title and groupId are required.",
-    "• Every ingredient/step/nutrition/databox entry must include its id so the builder can match references.",
-    "• requires must list prior step ids whenever sequencing matters.",
-    "• databox expressions should mirror the manual form and can reference other databox ids.",
-  ].join("\n"),
-  addTask: [
-    "/add task",
-    "",
-    "Immediately after /add task output only a JSON object with this structure:",
-    TASK_COMMAND_TEMPLATE,
-    "Rules for /add task:",
-    "• title and groupId are required.",
-    "• link can include any combination of text, pantryId, and recipeId.",
-    "• assignees accepts an array of display names; omit the key if nobody is assigned yet.",
-  ].join("\n"),
-  logFood: [
-    "/log food",
-    "",
-    "Immediately after /log food output only a JSON object with this structure:",
-    FOOD_LOG_COMMAND_TEMPLATE,
-    "Rules for /log food:",
-    "• Set mode to \"existing\" when logging a pantry item by ID; include foodId and (optionally) servingId.",
-    "• Set mode to \"manual\" when no pantry item exists; include manual.name and manual.servingLabel plus any nutrient data you have.",
-    "• quantity defaults to 1 if omitted. Use decimal strings (\"0.5\") when needed.",
-    "• loggedDate defaults to today if omitted.",
-    "• groupId is optional. When mode=existing and you omit it, the pantry item’s group is used automatically.",
-    "• If you don’t know a nutrient value, omit that field under manual.nutrients entirely.",
-  ].join("\n"),
-  ai: [
-    "/ai",
-    "• Outputs these rules verbatim and copies them to the clipboard so another AI can read them.",
-    "• Never add extra commentary or pre/post text when sharing.",
-    "• Remind copilots that commands can be chained by sending one slash command per line.",
-  ].join("\n"),
-  orchestratorDemo: [
-    "/orchestrator",
-    "• Runs the orchestrator demo that fakes two pantry images and builds /add food commands for each detected item.",
-    "• Use this to verify the on-device tool pipeline without uploading real photos.",
-  ].join("\n"),
-};
-
-const TOOL_LABELS: Record<ToolName, string> = {
-  vision: "Vision bot",
-  intentParser: "Intent Parser",
-  commandBuilder: "Command Builder",
-  jsonFixer: "JSON Fixer",
-  explanation: "Orchestrator",
-};
-
-const COMMAND_BLUEPRINTS: CommandBlueprint[] = [
-  {
-    type: "help",
-    name: "/help",
-    aliases: ["/commands"],
-    usage: "/help",
-    description: "Lists every command plus its usage string.",
-  },
-  {
-    type: "addFood",
-    name: "/add food",
-    usage: FOOD_COMMAND_TEMPLATE,
-    description: "Structured JSON covering barcode, catalog links, group assignment, and every nutrient per serving.",
-  },
-  {
-    type: "addRecipe",
-    name: "/add recipe",
-    usage: RECIPE_COMMAND_TEMPLATE,
-    description: "JSON lets you populate ingredients, steps, dependencies, nutrition, databox expressions, and group assignment.",
-  },
-  {
-    type: "addTask",
-    name: "/add task",
-    usage: TASK_COMMAND_TEMPLATE,
-    description: "JSON captures start/due windows, links, assignees, and group information for review.",
-  },
-  {
-    type: "logFood",
-    name: "/log food",
-    usage: FOOD_LOG_COMMAND_TEMPLATE,
-    description: "Logs today’s eating via pantry linkage or manual macro entry.",
-  },
-  {
-    type: "ai",
-    name: "/ai",
-    usage: "/ai",
-    description: "Prints the full rulebook and copies it to the clipboard for other copilots.",
-  },
-  {
-    type: "orchestratorDemo",
-    name: "/orchestrator",
-    usage: "/orchestrator",
-    description: "Runs the orchestrator demo that detects items from pantry photos and builds /add food commands.",
-  },
-];
-
-const buildRulesPrompt = (groupLines: string[]) => {
-  const sections = [
-    ...GENERAL_RULE_LINES,
-    "",
-    COMMAND_RULES.help,
-    "",
-    COMMAND_RULES.addFood,
-    "",
-    COMMAND_RULES.addRecipe,
-    "",
-    COMMAND_RULES.addTask,
-    "",
-    COMMAND_RULES.logFood,
-    "",
-    COMMAND_RULES.ai,
-    "",
-    "Multi-command guidance",
-    "- Send commands one per line or in separate messages. Each line must start with the slash keyword.",
-    "- Example:",
-    "  /add food {...}",
-    "  /add task {...}",
-    "- The assistant executes the commands sequentially and reports results after each one.",
-    "",
-    "Accessible groups",
-    ...groupLines,
-  ];
-  return sections.join("\n");
-};
-
 const createMessage = (text: string, role: Message["role"], action?: MessageAction, speaker?: string): Message => ({
   id: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   role,
@@ -954,12 +659,7 @@ const estimateTokenLength = (text: string) => {
   return Math.ceil(normalized.split(/\s+/).length * 1.3);
 };
 const detectTruncation = (text: string, maxTokens: number) => estimateTokenLength(text) >= maxTokens - 20;
-const CONTINUE_SYSTEM_PROMPT =
-  "Continue the previous response verbatim from the exact point it stopped. Do not repeat the earlier sentences, only finish the answer.";
-
-const INITIAL_MESSAGE = createSystemMessage(
-  "Welcome to the Fragments AI console. Run /help to see the JSON-based slash commands."
-);
+const INITIAL_MESSAGE = createSystemMessage(INITIAL_SYSTEM_GREETING);
 
 const formatMeta = (values: (string | undefined)[]) => values.filter(Boolean).join(" • ");
 
@@ -970,17 +670,15 @@ export const AiChatScreen = () => {
   const selectedOnDeviceModel = ON_DEVICE_MODEL_MAP[modelKey] ?? ON_DEVICE_MODEL_MAP[DEFAULT_ON_DEVICE_MODEL];
   const shouldLoadExecModel = llmProvider === "openSource";
   const execLlm = useLLM({ model: selectedOnDeviceModel.resource, preventLoad: !shouldLoadExecModel });
-  const {
-    configure: execConfigure,
-    generate: execGenerate,
-    isReady: execReady,
-    isGenerating: execGenerating,
-    downloadProgress: execDownloadProgress,
-    error: execError,
-    response: execResponse,
-    messageHistory: execMessageHistory,
-    interrupt: execInterrupt,
-  } = execLlm;
+  const execConfigure = execLlm?.configure ?? noop;
+  const execGenerate = execLlm?.generate ?? asyncNoop;
+  const execReady = execLlm?.isReady ?? false;
+  const execGenerating = execLlm?.isGenerating ?? false;
+  const execDownloadProgress = execLlm?.downloadProgress ?? 0;
+  const execError = execLlm?.error ?? null;
+  const execResponse = execLlm?.response ?? "";
+  const execMessageHistory = execLlm?.messageHistory ?? ([] as LlmMessage[]);
+  const execInterrupt = execLlm?.interrupt;
   const insets = useSafeAreaInsets();
   const headerHeight = useHeaderHeight();
   const [messages, setMessages] = useState<Message[]>([INITIAL_MESSAGE]);
@@ -1017,6 +715,30 @@ export const AiChatScreen = () => {
       ...prev,
       [actionKey(action)]: true,
     }));
+  }, []);
+
+  const copyTextToClipboard = useCallback(async (text: string) => {
+    try {
+      await Clipboard.setStringAsync(text);
+      return true;
+    } catch (nativeError) {
+      console.error("Failed to copy text with expo clipboard", nativeError);
+      const navigatorReference =
+        typeof globalThis === "object" && "navigator" in globalThis
+          ? (globalThis as typeof globalThis & { navigator?: NavigatorClipboard }).navigator
+          : undefined;
+      const clipboard = navigatorReference?.clipboard;
+      const writeText = clipboard?.writeText;
+      if (typeof writeText === "function") {
+        try {
+          await writeText.call(clipboard, text);
+          return true;
+        } catch (webError) {
+          console.error("Navigator clipboard fallback failed", webError);
+        }
+      }
+      return false;
+    }
   }, []);
 
   const ensureCameraModule = useCallback(async () => {
@@ -1076,19 +798,8 @@ export const AiChatScreen = () => {
     pendingAttachmentsRef.current = pendingAttachments;
   }, [pendingAttachments]);
 
-  const conversationalPrompt = useMemo(
-    () =>
-      [
-        "You are Fragments' offline assistant that runs locally on this device.",
-        "You do NOT execute commands yourself. Instead, explain the slash commands a user should run when structured actions are needed.",
-        "Follow the JSON contracts from /help when sharing sample commands, and keep replies concise.",
-        "Whenever you output an actionable command, it MUST start with '/', never with '!'.",
-        "Prefer returning commands directly like `/log food { ... }` instead of describing steps with prose.",
-        "Accessible groups:",
-        ...groupLines,
-      ].join("\n"),
-    [groupLines],
-  );
+  // System prompt passed to the on-device LLM for the primary chat assistant.
+  const conversationalPrompt = useMemo(() => createConversationalPrompt(groupLines), [groupLines]);
 
   useEffect(() => {
     if (!shouldLoadExecModel || !execReady) {
@@ -1105,7 +816,7 @@ export const AiChatScreen = () => {
 
   useEffect(() => {
     if (!shouldLoadExecModel) {
-      execInterrupt();
+      execInterrupt?.();
     }
   }, [execInterrupt, shouldLoadExecModel]);
 
@@ -1694,8 +1405,14 @@ export const AiChatScreen = () => {
         }
         case "ai": {
           const prompt = buildRulesPrompt(groupLines);
-          await Clipboard.setStringAsync(prompt);
-          return [createSystemMessage(prompt)];
+          const copied = await copyTextToClipboard(prompt);
+          const responses = [createSystemMessage(prompt)];
+          if (!copied) {
+            responses.push(
+              createSystemMessage("Unable to copy the AI rules automatically. Copy the response above manually."),
+            );
+          }
+          return responses;
         }
         case "orchestratorDemo": {
           const result = await handleOrchestratorJob("/orchestrator", pendingAttachmentsRef.current);
@@ -1712,6 +1429,7 @@ export const AiChatScreen = () => {
       addRecipeEntry,
       addTaskEntry,
       commandSummary,
+      copyTextToClipboard,
       groupLines,
       handleLogFoodCommand,
       handleOrchestratorJob,
@@ -1846,6 +1564,7 @@ export const AiChatScreen = () => {
           { role: "assistant", content: target.text },
           { role: "user", content: "Continue from the exact point where you stopped." },
         ];
+        // Feed the continuation system prompt first so the LLM resumes output verbatim.
         const callConversation: AiThreadMessage[] = [{ role: "system", content: CONTINUE_SYSTEM_PROMPT }, ...history];
         const result = await callLocalModel({
           conversation: callConversation,
