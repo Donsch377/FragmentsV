@@ -35,7 +35,7 @@ type RecipePreview = {
   summary?: string | null;
 };
 
-const GROUP_TABS = ["Overview", "Recipes", "Inventory", "Members", "Settings", "Tasks", "Chat"] as const;
+const GROUP_TABS = ["Home", "Recipes", "Tasks", "Members", "Settings", "Chat"] as const;
 type GroupTab = (typeof GROUP_TABS)[number];
 
 const initialSystemMessages: Message[] = [];
@@ -68,7 +68,7 @@ export const GroupDetailScreen = () => {
     [route.params],
   );
 
-  const [activeTab, setActiveTab] = useState<GroupTab>("Overview");
+  const [activeTab, setActiveTab] = useState<GroupTab>("Home");
   const [groupDetails, setGroupDetails] = useState<Partial<Group> | null>(null);
   const [groupNameInput, setGroupNameInput] = useState(fallbackGroup.name);
   const [groupDescription, setGroupDescription] = useState(fallbackGroup.description ?? "");
@@ -379,76 +379,127 @@ export const GroupDetailScreen = () => {
     ]);
   };
 
-  const renderOverview = () => (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>Group Overview</Text>
-      <Text style={styles.cardBody}>{groupDescription || "Share pantry stats, goals, or member roles here."}</Text>
-      <View style={styles.statGrid}>
-        <View style={styles.statTile}>
-          <Text style={styles.statLabel}>Members</Text>
-          <Text style={styles.statValue}>{stats.members}</Text>
-        </View>
-        <View style={styles.statTile}>
-          <Text style={styles.statLabel}>Recipes</Text>
-          <Text style={styles.statValue}>{stats.recipes}</Text>
-        </View>
-        <View style={styles.statTile}>
-          <Text style={styles.statLabel}>Inventory</Text>
-          <Text style={styles.statValue}>{stats.inventory}</Text>
-        </View>
-      </View>
-      <View style={styles.quickGrid}>
-        <View style={styles.quickCard}>
-          <Text style={styles.quickLabel}>Invite code</Text>
-          <Text style={styles.quickValue}>{groupDetails?.invite_code ?? fallbackGroup.code}</Text>
-          <TouchableOpacity onPress={handleCopyCode} style={styles.quickButton}>
-            <Text style={styles.quickButtonText}>Copy</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.quickCard}>
-          <Text style={styles.quickLabel}>Plan ahead</Text>
-          <Text style={styles.quickHint}>Assign tasks or attach recipes to keep everyone synced.</Text>
-          <TouchableOpacity onPress={() => setTaskModalVisible(true)} style={styles.quickButton}>
-            <Text style={styles.quickButtonText}>New task</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-      <View style={styles.previewSection}>
-        <Text style={styles.sectionTitle}>Inventory highlights</Text>
-        {inventoryPreview.length ? (
-          inventoryPreview.map((item) => (
-            <View key={item.id} style={styles.previewRowItem}>
-              <Image source={{ uri: item.image_url || DEFAULT_FOOD_IMAGE }} style={styles.previewImage} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.previewName}>{item.name}</Text>
-                <Text style={styles.previewMeta}>
-                  {item.best_by ? `Best by ${new Date(item.best_by).toLocaleDateString()}` : "No expiry set"}
-                </Text>
-              </View>
+  const formatTaskDueDate = (task: TaskRecord) => {
+    if (task.due_at) {
+      return `Due ${new Date(task.due_at).toLocaleDateString()}`;
+    }
+    if (task.due_date) {
+      return `Due ${task.due_date}`;
+    }
+    return "No due date yet";
+  };
+
+  const itemBestByTime = (value?: string | null) => {
+    if (!value) return Number.MAX_SAFE_INTEGER;
+    const parsed = new Date(value).getTime();
+    return Number.isNaN(parsed) ? Number.MAX_SAFE_INTEGER : parsed;
+  };
+
+  const renderHome = () => {
+    const nextTasks = tasks.slice(0, 3);
+    const expiringSorted = [...inventoryPreview]
+      .filter((item) => Boolean(item.best_by))
+      .sort((a, b) => itemBestByTime(a.best_by) - itemBestByTime(b.best_by));
+    const expiringSoonCount = expiringSorted.length;
+    const expiringSoon = expiringSorted.slice(0, 3);
+    const inventoryHighlights = expiringSoon.length ? expiringSoon : inventoryPreview.slice(0, 3);
+    const latestActivity = fallbackGroup.lastActivity || "No recent activity yet.";
+
+    return (
+      <View style={styles.homeStack}>
+        <View style={styles.card}>
+          <Text style={styles.homeEyebrow}>Today in this group</Text>
+          <View style={styles.homeStatRow}>
+            <View style={styles.homeStat}>
+              <Text style={styles.homeStatValue}>{stats.members}</Text>
+              <Text style={styles.homeStatLabel}>Members</Text>
             </View>
-          ))
-        ) : (
-          <Text style={styles.cardBody}>No shared items yet. Head to Inventory to add the first entry.</Text>
-        )}
-      </View>
-      <View style={styles.previewSection}>
-        <Text style={styles.sectionTitle}>Recipe lineup</Text>
-        {recipePreview.length ? (
-          recipePreview.map((item) => (
-            <View key={item.id} style={styles.previewRowItem}>
-              <Image source={{ uri: item.image_url || DEFAULT_FOOD_IMAGE }} style={styles.previewImage} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.previewName}>{item.name}</Text>
-                <Text style={styles.previewMeta}>{item.summary || "No summary provided"}</Text>
-              </View>
+            <View style={styles.homeStat}>
+              <Text style={styles.homeStatValue}>{stats.recipes}</Text>
+              <Text style={styles.homeStatLabel}>Recipes</Text>
             </View>
-          ))
-        ) : (
-          <Text style={styles.cardBody}>Capture your first recipe to share prep steps with the crew.</Text>
-        )}
+            <View style={styles.homeStat}>
+              <Text style={styles.homeStatValue}>{expiringSoonCount}</Text>
+              <Text style={styles.homeStatLabel}>Expiring soon</Text>
+            </View>
+          </View>
+          <Text style={styles.homeActivity}>{latestActivity}</Text>
+          <View style={styles.homeList}>
+            <View style={styles.homeListHeader}>
+              <Text style={styles.sectionTitle}>Upcoming tasks</Text>
+              <TouchableOpacity onPress={() => setActiveTab("Tasks")}>
+                <Text style={styles.linkText}>View all</Text>
+              </TouchableOpacity>
+            </View>
+            {nextTasks.length ? (
+              nextTasks.map((task) => (
+                <View key={task.id} style={styles.homeListRow}>
+                  <Text style={styles.homeListTitle}>{task.title}</Text>
+                  <Text style={styles.homeListMeta}>{formatTaskDueDate(task)}</Text>
+                </View>
+              ))
+            ) : (
+              <Text style={styles.cardBody}>No tasks scheduled for the crew today.</Text>
+            )}
+          </View>
+          <View style={styles.homeButtons}>
+            <TouchableOpacity style={styles.primaryLinkButton} onPress={handleManageInventory}>
+              <Text style={styles.primaryLinkButtonText}>Open group pantry</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.secondaryLinkButton} onPress={() => setActiveTab("Recipes")}>
+              <Text style={styles.secondaryLinkButtonText}>View recipes for this group</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.card}>
+          <View style={styles.cardHeaderRow}>
+            <Text style={styles.cardTitle}>Inventory highlights</Text>
+            <TouchableOpacity onPress={handleManageInventory}>
+              <Text style={styles.linkText}>Open full pantry</Text>
+            </TouchableOpacity>
+          </View>
+          {inventoryHighlights.length ? (
+            inventoryHighlights.map((item) => (
+              <View key={item.id} style={styles.previewRowItem}>
+                <Image source={{ uri: item.image_url || DEFAULT_FOOD_IMAGE }} style={styles.previewImage} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.previewName}>{item.name}</Text>
+                  <Text style={styles.previewMeta}>
+                    {item.best_by ? `Best by ${new Date(item.best_by).toLocaleDateString()}` : "No expiry set"}
+                  </Text>
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.cardBody}>No shared items yet. Head to the pantry to add the first entry.</Text>
+          )}
+        </View>
+
+        <View style={styles.card}>
+          <View style={styles.cardHeaderRow}>
+            <Text style={styles.cardTitle}>Recent recipes</Text>
+            <TouchableOpacity onPress={() => setActiveTab("Recipes")}>
+              <Text style={styles.linkText}>View recipes</Text>
+            </TouchableOpacity>
+          </View>
+          {recipePreview.length ? (
+            recipePreview.slice(0, 3).map((item) => (
+              <View key={item.id} style={styles.previewRowItem}>
+                <Image source={{ uri: item.image_url || DEFAULT_FOOD_IMAGE }} style={styles.previewImage} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.previewName}>{item.name}</Text>
+                  <Text style={styles.previewMeta}>{item.summary || "No summary provided"}</Text>
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.cardBody}>Capture your first recipe to share prep steps with the crew.</Text>
+          )}
+        </View>
       </View>
-    </View>
-  );
+    );
+  };
 
   const renderRecipes = () => (
     <View style={styles.card}>
@@ -470,32 +521,6 @@ export const GroupDetailScreen = () => {
         ))
       ) : (
         <Text style={styles.cardBody}>No recipes yet. Tap "Add Recipe" to capture your first one.</Text>
-      )}
-    </View>
-  );
-
-  const renderInventory = () => (
-    <View style={styles.card}>
-      <View style={styles.cardHeaderRow}>
-        <Text style={styles.cardTitle}>Inventory</Text>
-        <TouchableOpacity style={styles.secondaryButton} onPress={handleManageInventory}>
-          <Text style={styles.secondaryButtonText}>Manage Inventory</Text>
-        </TouchableOpacity>
-      </View>
-      {inventoryPreview.length ? (
-        inventoryPreview.map((item) => (
-          <View key={item.id} style={styles.previewRowItem}>
-            <Image source={{ uri: item.image_url || DEFAULT_FOOD_IMAGE }} style={styles.previewImage} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.previewName}>{item.name}</Text>
-              <Text style={styles.previewMeta}>
-                {item.best_by ? `Best by ${new Date(item.best_by).toLocaleDateString()}` : "No expiry set"}
-              </Text>
-            </View>
-          </View>
-        ))
-      ) : (
-        <Text style={styles.cardBody}>No shared items yet. Use Manage Inventory to add the first item.</Text>
       )}
     </View>
   );
@@ -654,13 +679,13 @@ export const GroupDetailScreen = () => {
   );
 
   const renderChat = () => (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>Crew Chat</Text>
-        <ScrollView
-          style={styles.messagesList}
-          contentContainerStyle={{ paddingBottom: 12 }}
-          showsVerticalScrollIndicator={false}
-        >
+    <View style={styles.chatBlock}>
+      <Text style={styles.sectionTitle}>Crew Chat</Text>
+      <ScrollView
+        style={styles.messagesList}
+        contentContainerStyle={{ paddingBottom: 12 }}
+        showsVerticalScrollIndicator={false}
+      >
         {messages.map((message) => (
           <View
             key={message.id}
@@ -692,12 +717,10 @@ export const GroupDetailScreen = () => {
 
   const renderTabContent = () => {
     switch (activeTab) {
-      case "Overview":
-        return renderOverview();
+      case "Home":
+        return renderHome();
       case "Recipes":
         return renderRecipes();
-      case "Inventory":
-        return renderInventory();
       case "Members":
         return renderMembers();
       case "Settings":
@@ -769,7 +792,7 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     paddingHorizontal: 20,
-    paddingTop: 24,
+    paddingTop: 8,
     paddingBottom: 40,
   },
   header: {
@@ -799,8 +822,8 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   tabButton: {
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
     borderRadius: 999,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.15)",
@@ -879,6 +902,95 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontSize: 12,
     color: "rgba(255,255,255,0.6)",
+  },
+  homeStack: {
+    gap: 20,
+  },
+  homeEyebrow: {
+    fontSize: 12,
+    textTransform: "uppercase",
+    letterSpacing: 2,
+    color: "rgba(255,255,255,0.5)",
+  },
+  homeStatRow: {
+    flexDirection: "row",
+    gap: 12,
+    marginTop: 12,
+  },
+  homeStat: {
+    flex: 1,
+    borderRadius: 16,
+    backgroundColor: "#111927",
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+  },
+  homeStatValue: {
+    fontSize: 20,
+    fontWeight: "600",
+    color: "#ffffff",
+  },
+  homeStatLabel: {
+    marginTop: 4,
+    fontSize: 11,
+    color: "rgba(255,255,255,0.6)",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+  homeActivity: {
+    marginTop: 12,
+    fontSize: 14,
+    color: "rgba(255,255,255,0.75)",
+  },
+  homeList: {
+    marginTop: 16,
+    gap: 8,
+  },
+  homeListHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  homeListRow: {
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.08)",
+  },
+  homeListTitle: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#ffffff",
+  },
+  homeListMeta: {
+    marginTop: 2,
+    fontSize: 13,
+    color: "rgba(255,255,255,0.6)",
+  },
+  homeButtons: {
+    marginTop: 16,
+    gap: 10,
+  },
+  primaryLinkButton: {
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: "#0fb06a",
+    alignItems: "center",
+  },
+  primaryLinkButtonText: {
+    color: "#021004",
+    fontWeight: "700",
+  },
+  secondaryLinkButton: {
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.2)",
+    alignItems: "center",
+  },
+  secondaryLinkButtonText: {
+    color: "#ffffff",
+    fontWeight: "600",
   },
   cardHeaderRow: {
     flexDirection: "row",
@@ -973,52 +1085,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "600",
   },
-  quickGrid: {
-    flexDirection: "row",
-    gap: 12,
-    flexWrap: "wrap",
-    marginTop: 20,
-  },
-  quickCard: {
-    flex: 1,
-    minWidth: "48%",
-    borderRadius: 16,
-    backgroundColor: "#111927",
-    padding: 16,
-  },
-  quickLabel: {
-    fontSize: 12,
-    letterSpacing: 1,
-    textTransform: "uppercase",
-    color: "rgba(255,255,255,0.5)",
-  },
-  quickValue: {
-    marginTop: 8,
-    fontSize: 20,
-    fontWeight: "600",
-    color: "#ffffff",
-  },
-  quickHint: {
-    marginTop: 6,
-    fontSize: 13,
-    color: "rgba(255,255,255,0.7)",
-  },
-  quickButton: {
-    marginTop: 12,
-    alignSelf: "flex-start",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.2)",
-  },
-  quickButtonText: {
-    color: "#ffffff",
-    fontWeight: "600",
-  },
-  previewSection: {
-    marginTop: 20,
-  },
   previewRowItem: {
     flexDirection: "row",
     alignItems: "center",
@@ -1073,6 +1139,14 @@ const styles = StyleSheet.create({
     color: "#f87171",
     fontSize: 15,
     fontWeight: "600",
+  },
+  chatBlock: {
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    backgroundColor: "#0a101b",
+    padding: 16,
+    marginBottom: 20,
   },
   messagesList: {
     maxHeight: 220,

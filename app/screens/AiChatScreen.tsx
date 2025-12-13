@@ -58,8 +58,9 @@ import { fetchAccessibleGroups } from "../utils/groups";
 import { supabase } from "../lib/supabaseClient";
 import { FoodEntryModal } from "../components/FoodEntryModal";
 import { TaskModal } from "../components/TaskModal";
-import { runAppleOnDeviceBridge, AppleOnDeviceError, type AppleBridgeMessage } from "../lib/appleOnDeviceBridge";
-import { useLLM, type Message as LlmMessage } from "react-native-executorch";
+import { useExecModel, EMPTY_EXEC_MODEL, type ExecModelAdapter } from "../hooks/useExecModel";
+import { generateAppleResponse, AppleLLMError } from "../lib/appleBridge";
+import type { Message as LlmMessage } from "react-native-executorch";
 
 type MessageAction =
   | {
@@ -111,6 +112,66 @@ type CommandBlueprint = {
   aliases?: string[];
   usage: string;
   description: string;
+};
+
+const COMMAND_BLUEPRINTS: CommandBlueprint[] = [
+  {
+    type: "help",
+    name: "/help",
+    aliases: ["/commands"],
+    usage: "/help",
+    description: "Show all available slash commands and their JSON contracts.",
+  },
+  {
+    type: "addFood",
+    name: "/add food",
+    aliases: [],
+    usage: `/add food ${FOOD_COMMAND_TEMPLATE}`,
+    description: "Capture a pantry item from a JSON object.",
+  },
+  {
+    type: "addRecipe",
+    name: "/add recipe",
+    aliases: [],
+    usage: `/add recipe ${RECIPE_COMMAND_TEMPLATE}`,
+    description: "Capture a recipe, ingredients, steps, and databoxes from JSON.",
+  },
+  {
+    type: "addTask",
+    name: "/add task",
+    aliases: [],
+    usage: `/add task ${TASK_COMMAND_TEMPLATE}`,
+    description: "Capture a task with optional dates, assignees, and links.",
+  },
+  {
+    type: "logFood",
+    name: "/log food",
+    aliases: [],
+    usage: `/log food ${FOOD_LOG_COMMAND_TEMPLATE}`,
+    description: "Insert a food log entry, either linked to a pantry item or manual.",
+  },
+  {
+    type: "ai",
+    name: "/ai",
+    aliases: [],
+    usage: "/ai",
+    description: "Print and copy the full AI command rulebook for other copilots.",
+  },
+  {
+    type: "orchestratorDemo",
+    name: "/orchestrator",
+    aliases: ["/orchestrator demo"],
+    usage: "/orchestrator demo",
+    description: "Run the orchestrator demo that fakes pantry images and builds commands.",
+  },
+];
+
+const TOOL_LABELS: Record<ToolName, string> = {
+  vision: "Vision",
+  intentParser: "Intent parser",
+  commandBuilder: "Command builder",
+  jsonFixer: "JSON fixer",
+  explanation: "Explanation",
 };
 
 type TaskModalInitial = ComponentProps<typeof TaskModal>["initialTask"];
@@ -396,9 +457,17 @@ const normalizeRecipePayload = (raw: unknown) => {
   }
   const ingredients: RecipeIngredient[] = (payload.ingredients ?? []).map((ingredient, index) => ({
     id: toOptionalString(ingredient?.id) ?? createId("ingredient"),
-    label: toOptionalString(ingredient?.label) ?? `Ingredient ${index + 1}`,
-    amount: toOptionalString(ingredient?.amount) ?? "",
-    unit: toOptionalString(ingredient?.unit) ?? "",
+    label:
+      coalesceString(
+        (ingredient as any)?.label,
+        (ingredient as any)?.name,
+      ) ?? `Ingredient ${index + 1}`,
+    amount:
+      coalesceString(
+        (ingredient as any)?.amount,
+        (ingredient as any)?.quantity,
+      ) ?? "",
+    unit: coalesceString((ingredient as any)?.unit) ?? "",
     linkedFoodId: toOptionalString((ingredient as any)?.linkedFoodId ?? (ingredient as any)?.linked_food_id) ?? "",
   }));
   const steps: RecipeStep[] = (payload.steps ?? []).map((step, index) => {
@@ -406,7 +475,11 @@ const normalizeRecipePayload = (raw: unknown) => {
     const ingredientUsages: RecipeStepIngredientUsage[] = Array.isArray(step?.ingredientUsages ?? (step as any)?.ingredients)
       ? (step?.ingredientUsages ?? (step as any)?.ingredients).map((usage: Partial<RecipeStepIngredientUsage>) => ({
           ingredientId: toOptionalString((usage as any)?.ingredientId ?? (usage as any)?.ingredient_id) ?? "",
-          amount: toOptionalString(usage?.amount) ?? "",
+          amount:
+            coalesceString(
+              (usage as any)?.amount,
+              (usage as any)?.quantity,
+            ) ?? "",
         }))
       : [];
     const databoxValues: RecipeStepDataboxValue[] = Array.isArray(step?.databoxValues ?? (step as any)?.databoxes)
@@ -417,13 +490,17 @@ const normalizeRecipePayload = (raw: unknown) => {
       : [];
     return {
       id: toOptionalString(step?.id) ?? createId("step"),
-      summary: toOptionalString(step?.summary) ?? `Step ${index + 1}`,
-      notes: toOptionalString(step?.notes),
+      summary:
+        coalesceString(
+          (step as any)?.summary,
+          (step as any)?.title,
+        ) ?? `Step ${index + 1}`,
+      notes: coalesceString((step as any)?.notes, (step as any)?.body),
       requires,
       ingredientUsages,
-    databoxValues,
-  };
-});
+      databoxValues,
+    };
+  });
   const nutrition: RecipeNutritionField[] = (payload.nutrition ?? []).map((field, index) => ({
     id: toOptionalString(field?.id) ?? createId("nutrition"),
     key: (field?.key ?? "calories") as RecipeNutritionField["key"],
@@ -666,19 +743,45 @@ const formatMeta = (values: (string | undefined)[]) => values.filter(Boolean).jo
 export const AiChatScreen = () => {
   const navigation = useNavigation<NavigationProp<ParamListBase>>();
   const { session } = useAuth();
-  const { provider: llmProvider, modelKey, chatMode } = useAiPreferences();
+  const { textProvider, modelKey, chatMode } = useAiPreferences();
   const selectedOnDeviceModel = ON_DEVICE_MODEL_MAP[modelKey] ?? ON_DEVICE_MODEL_MAP[DEFAULT_ON_DEVICE_MODEL];
-  const shouldLoadExecModel = llmProvider === "openSource";
-  const execLlm = useLLM({ model: selectedOnDeviceModel.resource, preventLoad: !shouldLoadExecModel });
-  const execConfigure = execLlm?.configure ?? noop;
-  const execGenerate = execLlm?.generate ?? asyncNoop;
-  const execReady = execLlm?.isReady ?? false;
-  const execGenerating = execLlm?.isGenerating ?? false;
-  const execDownloadProgress = execLlm?.downloadProgress ?? 0;
-  const execError = execLlm?.error ?? null;
-  const execResponse = execLlm?.response ?? "";
-  const execMessageHistory = execLlm?.messageHistory ?? ([] as LlmMessage[]);
-  const execInterrupt = execLlm?.interrupt;
+  const shouldLoadExecModel = textProvider === "openSource";
+  const execModelHook = useExecModel(selectedOnDeviceModel.resource, shouldLoadExecModel);
+  const execModel = execModelHook ?? EMPTY_EXEC_MODEL;
+  const execConfigure = execModel.configure ?? noop;
+  const execGenerate = execModel.generate ?? asyncNoop;
+  const execReady = execModel.ready;
+  const execGenerating = execModel.generating;
+  const execDownloadProgress = execModel.downloadProgress;
+  const execError = execModel.error;
+  const execResponse = execModel.response ?? "";
+  let execInterrupt: ExecModelAdapter["interrupt"];
+  try {
+    execInterrupt = shouldLoadExecModel ? execModel.interrupt : undefined;
+  } catch (error) {
+    console.error("[AiChat] execModel interrupt access failed", error, {
+      provider: textProvider,
+      shouldLoadExecModel,
+      execModelHook,
+      execModelSnapshot: {
+        ready: execModel?.ready,
+        generating: execModel?.generating,
+        downloadProgress: execModel?.downloadProgress,
+      },
+    });
+    execInterrupt = undefined;
+  }
+  useEffect(() => {
+    console.log("[AiChat] exec model snapshot", {
+      provider: textProvider,
+      shouldLoadExecModel,
+      hasHook: Boolean(execModelHook),
+      ready: execModel.ready,
+      generating: execModel.generating,
+      downloadProgress: execModel.downloadProgress,
+      hasInterrupt: typeof execModel.interrupt === "function",
+    });
+  }, [execModel.downloadProgress, execModel.generating, execModel.ready, execModelHook, shouldLoadExecModel, textProvider]);
   const insets = useSafeAreaInsets();
   const headerHeight = useHeaderHeight();
   const [messages, setMessages] = useState<Message[]>([INITIAL_MESSAGE]);
@@ -695,7 +798,6 @@ export const AiChatScreen = () => {
   const activeActionRef = useRef<MessageAction | null>(null);
   const [aiThread, setAiThread] = useState<AiThreadMessage[]>([]);
   const aiThreadRef = useRef<AiThreadMessage[]>([]);
-  const appleAbortRef = useRef<AbortController | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
@@ -858,33 +960,18 @@ export const AiChatScreen = () => {
     maxTokens?: number;
   };
 
-  const callLocalModel = useCallback(
-    async ({ conversation, streamMessageId = null, maxTokens }: LocalModelCallParams) => {
-      const tokenBudget = maxTokens ?? responseSettings.maxTokens;
-      const requestId = createId("llm");
-      const prefix = `[LLM:${requestId}]`;
-      console.log(`${prefix} provider=${llmProvider} maxTokens=${tokenBudget} messages=${conversation.length}`);
-      conversation.forEach((message, index) => {
-        console.log(`${prefix} [${index}] ${message.role.toUpperCase()}: ${message.content}`);
-      });
-      if (llmProvider === "apple") {
-        appleAbortRef.current?.abort();
-        const controller = new AbortController();
-        appleAbortRef.current = controller;
-        const response = await runAppleOnDeviceBridge({
-          messages: conversation as AppleBridgeMessage[],
-          signal: controller.signal,
-          maxOutputTokens: tokenBudget,
-        });
-        appleAbortRef.current = null;
-        const truncated = response.finishReason === "length";
-        console.log(`${prefix} RESPONSE finishReason=${response.finishReason} truncated=${truncated}`);
-        console.log(`${prefix} TEXT:\n${response.text}`);
-        return {
-          text: response.text,
-          truncated,
-        };
-      }
+  const runExecProvider = useCallback(
+    async ({
+      conversation,
+      streamMessageId,
+      tokenBudget,
+      prefix,
+    }: {
+      conversation: AiThreadMessage[];
+      streamMessageId: string | null;
+      tokenBudget: number;
+      prefix: string;
+    }) => {
       execResponseRef.current = "";
       if (streamMessageId) {
         setStreamingMessageId(streamMessageId);
@@ -905,7 +992,49 @@ export const AiChatScreen = () => {
         truncated,
       };
     },
-    [llmProvider, responseSettings.maxTokens, execGenerate],
+    [execGenerate, setStreamingMessageId],
+  );
+
+  const callLocalModel = useCallback(
+    async ({ conversation, streamMessageId = null, maxTokens }: LocalModelCallParams) => {
+      const tokenBudget = maxTokens ?? responseSettings.maxTokens;
+      const requestId = createId("llm");
+      const prefix = `[LLM:${requestId}]`;
+      console.log(`${prefix} provider=${textProvider} maxTokens=${tokenBudget} messages=${conversation.length}`);
+      conversation.forEach((message, index) => {
+        console.log(`${prefix} [${index}] ${message.role.toUpperCase()}: ${message.content}`);
+      });
+      if (textProvider === "apple") {
+        const flattened = conversation
+          .map((message) => `[${message.role.toUpperCase()}]\n${message.content}`)
+          .join("\n\n");
+        try {
+          const response = await generateAppleResponse(flattened, async () => {
+            console.log(`${prefix} FALLBACK -> ExecuTorch provider`);
+            const execResult = await runExecProvider({ conversation, streamMessageId, tokenBudget, prefix });
+            return {
+              text: execResult.text,
+              finishReason: execResult.truncated ? "length" : "stop",
+            };
+          });
+          const truncated = response.finishReason === "length";
+          console.log(`${prefix} RESPONSE finishReason=${response.finishReason ?? "stop"} truncated=${truncated}`);
+          console.log(`${prefix} TEXT:\n${response.text}`);
+          return {
+            text: response.text,
+            truncated,
+          };
+        } catch (error) {
+          const normalized =
+            error instanceof AppleLLMError
+              ? error
+              : new AppleLLMError("GENERATION_FAILED", error instanceof Error ? error.message : String(error));
+          throw normalized;
+        }
+      }
+      return runExecProvider({ conversation, streamMessageId, tokenBudget, prefix });
+    },
+    [responseSettings.maxTokens, runExecProvider, textProvider],
   );
 
   const callToolModel = useCallback(
@@ -1026,13 +1155,7 @@ export const AiChatScreen = () => {
     syncAiThread([]);
     setAiError(null);
     setAiBusy(false);
-  }, [llmProvider, modelKey, syncAiThread]);
-
-  useEffect(() => {
-    return () => {
-      appleAbortRef.current?.abort();
-    };
-  }, []);
+  }, [modelKey, syncAiThread, textProvider]);
 
   useEffect(() => {
     streamingMessageIdRef.current = streamingMessageId;
@@ -1496,7 +1619,7 @@ export const AiChatScreen = () => {
     async (text: string, conversation: AiThreadMessage[]) => {
       setAiBusy(true);
       setAiError(null);
-      if (llmProvider === "openSource" && !execReady) {
+      if (textProvider === "openSource" && !execReady) {
         setMessages((prev) => [
           ...prev,
           createSystemMessage("Model is still warming up. Keep this tab open until the download completes."),
@@ -1542,7 +1665,7 @@ export const AiChatScreen = () => {
       conversationalPrompt,
       createAssistantPlaceholder,
       execReady,
-      llmProvider,
+      textProvider,
       shouldLoadExecModel,
       syncAiThread,
       updateMessage,
@@ -1639,7 +1762,25 @@ export const AiChatScreen = () => {
   ]);
 
   const tipHeader = useMemo(
-    () => <Text style={styles.tipText}>Use /help if you need the slash commands.</Text>,
+    () => (
+      <View style={styles.tipHeader}>
+        <Text style={styles.tipTitle}>Fragments AI console</Text>
+        <Text style={styles.tipText}>
+          Use <Text style={styles.tipCode}>/help</Text> for commands, or describe what you need.
+        </Text>
+        <View style={styles.tipChipRow}>
+          {["/add food {…}", "/add recipe {…}", "/log food {…}"].map((hint) => (
+            <TouchableOpacity
+              key={hint}
+              style={styles.tipChip}
+              onPress={() => setInput((prev) => (prev ? prev : hint))}
+            >
+              <Text style={styles.tipChipText}>{hint}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+    ),
     [],
   );
   const Scanner = scannerComponent;
@@ -1776,9 +1917,9 @@ export const AiChatScreen = () => {
               {orchestratorRunning ? (
                 <Text style={styles.modelStatusText}>Running orchestrator workflow…</Text>
               ) : null}
-              {llmProvider === "apple" ? (
+              {textProvider === "apple" ? (
                 <Text style={styles.modelStatusHint}>
-                  Apple option expects an on-device bridge that forwards to AIPromptSession/CoreLLM.
+                  Apple mode currently falls back to the ExecuTorch model until Apple Intelligence ships.
                 </Text>
               ) : null}
             </View>
@@ -1840,10 +1981,39 @@ const styles = StyleSheet.create({
   messageList: {
     flex: 1,
   },
+  tipHeader: {
+    paddingBottom: 8,
+  },
+  tipTitle: {
+    color: "#ffffff",
+    fontSize: 15,
+    fontWeight: "600",
+    marginBottom: 2,
+  },
   tipText: {
     color: "rgba(255,255,255,0.55)",
     fontSize: 12,
-    marginBottom: 16,
+    marginBottom: 8,
+  },
+  tipCode: {
+    fontFamily: "Courier",
+    color: "#e5e7eb",
+  },
+  tipChipRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  tipChip: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.2)",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  tipChipText: {
+    color: "rgba(255,255,255,0.8)",
+    fontSize: 11,
   },
   messageBubble: {
     borderRadius: 14,

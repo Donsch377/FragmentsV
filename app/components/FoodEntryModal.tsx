@@ -17,8 +17,14 @@ import { useCameraPermissions } from "expo-camera";
 import type { BarcodeScanningResult, CameraViewProps } from "expo-camera";
 import { DEFAULT_FOOD_IMAGE } from "../constants/images";
 import { lookupBarcode, type BarcodeLookupResult } from "../features/barcodeLookup";
+import {
+  generateImage,
+  isImagePlaygroundSupported,
+  type GeneratedImage,
+} from "../features/imagePlayground";
 import { supabase } from "../lib/supabaseClient";
 import { useAuth } from "../providers/AuthProvider";
+import { useAiPreferences } from "../providers/AiPreferencesProvider";
 import { ensureGroupMembership, fetchAccessibleGroups } from "../utils/groups";
 import { captureAuthDebugSnapshot, type AuthDebugSnapshot } from "../utils/authDebug";
 import type {
@@ -31,6 +37,25 @@ import type {
 
 const FOOD_IMAGE_BUCKET = "food-photos";
 const FOOD_IMAGE_FOLDER = "items";
+const OPEN_SOURCE_IMAGE_SIZE = 768;
+const buildOpenSourceVariants = (prompt: string, count: number): GeneratedImage[] => {
+  const keyword = prompt.trim().length ? prompt.trim().toLowerCase() : "grocery";
+  const sanitized = encodeURIComponent(keyword);
+  const baseSeed = Date.now();
+  return Array.from({ length: count }).map((_, index) => ({
+    uri: `https://source.unsplash.com/${OPEN_SOURCE_IMAGE_SIZE}x${OPEN_SOURCE_IMAGE_SIZE}/?${sanitized}&sig=${baseSeed + index}`,
+    width: OPEN_SOURCE_IMAGE_SIZE,
+    height: OPEN_SOURCE_IMAGE_SIZE,
+  }));
+};
+
+const safeFileSlug = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
 
 const NUTRIENT_ROWS: { key: NutrientKeys; label: string; unit: string }[] = [
   { key: "energy_kcal", label: "Energy", unit: "kcal" },
@@ -90,6 +115,7 @@ export const FoodEntryModal = ({
   initialServings,
 }: FoodEntryModalProps) => {
   const { session } = useAuth();
+  const { imageProvider } = useAiPreferences();
   const [name, setName] = useState("");
   const [bestBy, setBestBy] = useState("");
   const [location, setLocation] = useState("");
@@ -107,6 +133,12 @@ export const FoodEntryModal = ({
   const [scannerComponent, setScannerComponent] = useState<ComponentType<CameraViewProps> | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [photoUploadStatus, setPhotoUploadStatus] = useState<"idle" | "uploading" | "done">("idle");
+  const [imagePlaygroundOptions, setImagePlaygroundOptions] = useState<GeneratedImage[]>([]);
+  const [imagePlaygroundLoading, setImagePlaygroundLoading] = useState(false);
+  const [imagePlaygroundError, setImagePlaygroundError] = useState<string | null>(null);
+  const [imagePrompt, setImagePrompt] = useState("");
+  const [imagePromptTouched, setImagePromptTouched] = useState(false);
+  const [selectedGeneratedUri, setSelectedGeneratedUri] = useState<string | null>(null);
   const [catalogId, setCatalogId] = useState<string | null>(null);
   const [groupOptions, setGroupOptions] = useState<{ id: string; name: string }[]>([]);
   const [groupMenuOpen, setGroupMenuOpen] = useState(false);
@@ -132,6 +164,12 @@ export const FoodEntryModal = ({
     setIsScannerVisible(false);
     setScannerComponent(null);
     setPhotoUploadStatus("idle");
+    setImagePlaygroundOptions([]);
+    setImagePlaygroundError(null);
+    setImagePlaygroundLoading(false);
+    setImagePrompt("");
+    setImagePromptTouched(false);
+    setSelectedGeneratedUri(null);
     setCatalogId(null);
     setGroupMenuOpen(false);
     setSelectedGroupId(defaultGroupId ?? null);
@@ -186,6 +224,18 @@ export const FoodEntryModal = ({
 
   const addServing = () => {
     setServings((prev) => [...prev, createServing({ label: `Serving ${prev.length + 1}` })]);
+  };
+
+  const handleImagePromptChange = (value: string) => {
+    if (!imagePromptTouched) {
+      setImagePromptTouched(true);
+    }
+    setImagePrompt(value);
+  };
+
+  const handleResetImagePrompt = () => {
+    setImagePrompt(name);
+    setImagePromptTouched(false);
   };
 
   const removeServing = (id: string) => {
@@ -356,6 +406,69 @@ export const FoodEntryModal = ({
       Alert.alert("Upload failed", "We couldn’t upload that photo. Please try again.");
     }
   };
+
+  const handleImagePlaygroundGenerate = async () => {
+    const title = name.trim();
+    const normalizedPrompt = (imagePrompt.trim().length ? imagePrompt.trim() : title).trim();
+    if (!normalizedPrompt.length) {
+      Alert.alert("Add a name first", "Give the item a name before generating an image.");
+      return;
+    }
+    setImagePlaygroundError(null);
+    setSelectedGeneratedUri(null);
+    setImagePlaygroundLoading(true);
+    try {
+      let variants: GeneratedImage[] = [];
+      if (imageProvider === "apple") {
+        if (!isImagePlaygroundSupported) {
+          setImagePlaygroundError("Image Playground is only available on iOS 18 or newer.");
+          setImagePlaygroundLoading(false);
+          return;
+        }
+        const result = await generateImage({ prompt: normalizedPrompt, count: 4, style: "illustration" });
+        variants = Array.isArray(result) ? result : [result];
+      } else {
+        variants = buildOpenSourceVariants(normalizedPrompt, 4);
+      }
+      setImagePlaygroundOptions(variants);
+      if (!variants.length) {
+        setImagePlaygroundError("No ideas came back. Try a longer prompt or different keywords.");
+      }
+    } catch (error) {
+      console.warn("Image Playground request failed", error);
+      setImagePlaygroundError(
+        error instanceof Error ? error.message : "Image Playground isn't available right now.",
+      );
+    } finally {
+      setImagePlaygroundLoading(false);
+    }
+  };
+
+  const handleUseImagePlaygroundVariant = useCallback(
+    async (variant: GeneratedImage) => {
+      if (!variant.uri) {
+        return;
+      }
+      setImagePlaygroundError(null);
+      setPhotoUploadStatus("uploading");
+      try {
+        const safeName = safeFileSlug(name) || "item";
+        const uploadedUrl = await uploadPhotoToStorage({
+          uri: variant.uri,
+          fileName: `${safeName}-generated-${Date.now()}.png`,
+          mimeType: "image/png",
+        });
+        setImageUrl(uploadedUrl);
+        setSelectedGeneratedUri(variant.uri);
+        setPhotoUploadStatus("done");
+      } catch (error) {
+        console.warn("Generated image upload failed", error);
+        setPhotoUploadStatus("idle");
+        Alert.alert("Upload failed", "We couldn’t store that generated image. Please try again.");
+      }
+    },
+    [name, uploadPhotoToStorage],
+  );
 
   const handleBarcodeScanned = async ({ data }: BarcodeScanningResult) => {
     if (!data || scannerLockRef.current) {
@@ -567,6 +680,12 @@ export const FoodEntryModal = ({
   useEffect(() => {
     selectedGroupLabelRef.current = selectedGroupLabel;
   }, [selectedGroupLabel]);
+
+  useEffect(() => {
+    if (!imagePromptTouched) {
+      setImagePrompt(name);
+    }
+  }, [imagePromptTouched, name]);
 
   useEffect(() => {
     console.log("[FoodEntryModal] group loader effect", { visible, sessionId: session?.user?.id, defaultGroupId });
@@ -949,22 +1068,102 @@ export const FoodEntryModal = ({
                       ? "No photo was found for this barcode. Add one so future scans use it."
                       : "This photo updates automatically when data is found for your barcode."}
                   </Text>
-                  <TouchableOpacity
-                    style={[
-                      styles.photoActionButton,
-                      photoUploadStatus === "uploading" && styles.photoActionButtonDisabled,
-                    ]}
-                    onPress={handleAddPhotoPress}
-                    disabled={photoUploadStatus === "uploading"}
-                  >
-                    {photoUploadStatus === "uploading" ? (
-                      <ActivityIndicator size="small" color="#050505" />
-                    ) : (
-                      <Text style={styles.photoActionText}>
-                        {imageUrl && imageUrl !== DEFAULT_FOOD_IMAGE ? "Change photo" : "Add photo"}
+                  <View style={styles.photoActionRow}>
+                    <TouchableOpacity
+                      style={[
+                        styles.photoActionButton,
+                        photoUploadStatus === "uploading" && styles.photoActionButtonDisabled,
+                      ]}
+                      onPress={handleAddPhotoPress}
+                      disabled={photoUploadStatus === "uploading"}
+                    >
+                      {photoUploadStatus === "uploading" ? (
+                        <ActivityIndicator size="small" color="#050505" />
+                      ) : (
+                        <Text style={styles.photoActionText}>
+                          {imageUrl && imageUrl !== DEFAULT_FOOD_IMAGE ? "Change photo" : "Add photo"}
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.photoActionButton,
+                        styles.photoActionButtonSecondary,
+                        imagePlaygroundLoading && styles.photoActionButtonDisabled,
+                      ]}
+                      onPress={handleImagePlaygroundGenerate}
+                      disabled={imagePlaygroundLoading}
+                    >
+                      {imagePlaygroundLoading ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : (
+                        <Text style={[styles.photoActionText, styles.photoActionTextSecondary]}>
+                          Generate image
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                  <View style={styles.imagePromptBlock}>
+                    <Text style={styles.imagePromptLabel}>Image prompt</Text>
+                    <TextInput
+                      style={styles.imagePromptInput}
+                      placeholder="ex: Moody product photo with dramatic lighting"
+                      placeholderTextColor="rgba(255,255,255,0.4)"
+                      value={imagePrompt}
+                      onChangeText={handleImagePromptChange}
+                      multiline
+                    />
+                    <TouchableOpacity style={styles.imagePromptReset} onPress={handleResetImagePrompt}>
+                      <Text style={styles.imagePromptResetText}>
+                        Use "{name.trim().length ? name : "item name"}"
                       </Text>
-                    )}
-                  </TouchableOpacity>
+                    </TouchableOpacity>
+                  </View>
+                  {imagePlaygroundError ? (
+                    <Text style={styles.imagePlaygroundErrorText}>{imagePlaygroundError}</Text>
+                  ) : null}
+                  <Text style={styles.imagePlaygroundSubtleHint}>
+                    {imageProvider === "apple"
+                      ? "Apple Image Playground runs locally on supported iPhones. Selecting a card uploads it to your pantry."
+                      : "Open-source mode pulls royalty-free inspiration from the web. Selecting a card saves a copy to Supabase."}
+                  </Text>
+                  {imagePlaygroundOptions.length ? (
+                    <View style={styles.imagePlaygroundPreviewBlock}>
+                      <Text style={styles.imagePlaygroundLabel}>Image Playground Ideas</Text>
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={styles.imagePlaygroundPreviewList}
+                      >
+                        {imagePlaygroundOptions.map((variant) => {
+                          const isActive = selectedGeneratedUri === variant.uri;
+                          return (
+                            <TouchableOpacity
+                              key={variant.uri}
+                              style={[
+                                styles.imagePlaygroundThumbnail,
+                                isActive && styles.imagePlaygroundThumbnailActive,
+                              ]}
+                              onPress={() => void handleUseImagePlaygroundVariant(variant)}
+                            >
+                              <Image
+                                source={{ uri: variant.uri }}
+                                style={styles.imagePlaygroundThumbnailImage}
+                              />
+                              {isActive ? (
+                                <Text style={styles.imagePlaygroundThumbnailBadge}>Selected</Text>
+                              ) : null}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </ScrollView>
+                      <Text style={styles.imagePlaygroundSubtleHint}>
+                        {imageProvider === "apple"
+                          ? "Images are generated on-device by Apple Image Playground. Tap one to upload it to your pantry."
+                          : "Images come from open photo sets based on your prompt. Tap one to save a copy to your pantry."}
+                      </Text>
+                    </View>
+                  ) : null}
                 </>
               )}
             </View>
@@ -1288,8 +1487,13 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: "rgba(255,255,255,0.6)",
   },
+  photoActionRow: {
+    marginTop: 8,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
   photoActionButton: {
-    marginTop: 6,
     borderRadius: 999,
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -1303,6 +1507,97 @@ const styles = StyleSheet.create({
     color: "#050505",
     fontWeight: "700",
     fontSize: 13,
+  },
+  photoActionButtonSecondary: {
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.25)",
+  },
+  photoActionTextSecondary: {
+    color: "#ffffff",
+  },
+  imagePromptBlock: {
+    marginTop: 12,
+    gap: 6,
+  },
+  imagePromptLabel: {
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 12,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+  imagePromptInput: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.15)",
+    borderRadius: 14,
+    padding: 12,
+    minHeight: 60,
+    color: "#ffffff",
+    backgroundColor: "rgba(255,255,255,0.03)",
+    textAlignVertical: "top",
+  },
+  imagePromptReset: {
+    alignSelf: "flex-start",
+  },
+  imagePromptResetText: {
+    color: "#60a5fa",
+    fontWeight: "600",
+    fontSize: 12,
+  },
+  imagePlaygroundErrorText: {
+    marginTop: 6,
+    color: "#f87171",
+    fontSize: 12,
+  },
+  imagePlaygroundPreviewBlock: {
+    marginTop: 12,
+    gap: 8,
+  },
+  imagePlaygroundLabel: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "rgba(255,255,255,0.65)",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+  imagePlaygroundPreviewList: {
+    flexDirection: "row",
+    gap: 12,
+  },
+  imagePlaygroundThumbnail: {
+    width: 96,
+    height: 96,
+    borderRadius: 18,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.2)",
+  },
+  imagePlaygroundThumbnailActive: {
+    borderColor: "#0fb06a",
+    shadowColor: "#0fb06a",
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+  },
+  imagePlaygroundThumbnailImage: {
+    width: "100%",
+    height: "100%",
+  },
+  imagePlaygroundThumbnailBadge: {
+    position: "absolute",
+    bottom: 6,
+    left: 10,
+    right: 10,
+    color: "#021004",
+    backgroundColor: "#0fb06a",
+    borderRadius: 999,
+    paddingVertical: 2,
+    fontSize: 10,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  imagePlaygroundSubtleHint: {
+    fontSize: 11,
+    color: "rgba(255,255,255,0.5)",
   },
   groupSelectionBlock: {
     gap: 8,

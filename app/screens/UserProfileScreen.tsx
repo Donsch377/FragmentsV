@@ -15,8 +15,10 @@ import {
 import { supabase } from "../lib/supabaseClient";
 import { useAuth } from "../providers/AuthProvider";
 import { useAiPreferences, type LlmProvider } from "../providers/AiPreferencesProvider";
-import { ON_DEVICE_MODEL_MAP, type OnDeviceModelKey } from "../constants/onDeviceModels";
+import { DEFAULT_ON_DEVICE_MODEL, ON_DEVICE_MODEL_MAP, type OnDeviceModelKey } from "../constants/onDeviceModels";
 import { CHAT_RESPONSE_MODES, type ChatResponseMode } from "../constants/aiConfig";
+import { useExecModel, EMPTY_EXEC_MODEL } from "../hooks/useExecModel";
+import { isAppleLLMSupported } from "../lib/appleBridge";
 
 if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -39,8 +41,10 @@ export const UserProfileScreen = () => {
   const { session } = useAuth();
   const profileId = session?.user?.id ?? "dev-user";
   const {
-    provider: aiProvider,
-    setProvider: setAiProvider,
+    textProvider,
+    setTextProvider,
+    imageProvider,
+    setImageProvider,
     modelKey,
     setModelKey,
     chatMode,
@@ -48,7 +52,7 @@ export const UserProfileScreen = () => {
   } = useAiPreferences();
   const [activeSection, setActiveSection] = useState<"Settings" | "Fragments">("Settings");
   const [nutritionOpen, setNutritionOpen] = useState(true);
-  const [selectedMetrics, setSelectedMetrics] = useState<NutritionOption[]>(["Calories", "Protein"]);
+  const [selectedMetrics, setSelectedMetrics] = useState<NutritionOption[]>([]);
   const [likes, setLikes] = useState("");
   const [dislikes, setDislikes] = useState("");
   const [allergies, setAllergies] = useState("");
@@ -71,11 +75,15 @@ export const UserProfileScreen = () => {
         key: "apple" as LlmProvider,
         title: "Apple on-device",
         description: "Use Apple Intelligence APIs (AIPromptSession/CoreLLM) when they become available on your device.",
-        footnote: isIOS ? "Requires iOS 18+ with Apple Intelligence enabled." : "Available on iOS only.",
-        disabled: !isIOS,
+        footnote: !isIOS
+          ? "Available on iOS only."
+          : !isAppleLLMSupported
+              ? "Requires iOS 18+ with Apple Intelligence enabled."
+              : "Falls back to the ExecuTorch provider until Apple Intelligence ships.",
+        disabled: !isIOS || !isAppleLLMSupported,
       },
     ],
-    [isIOS],
+    [isIOS, isAppleLLMSupported],
   );
 
   const toggleMetric = (metric: NutritionOption) => {
@@ -173,12 +181,20 @@ export const UserProfileScreen = () => {
     }
   };
 
-  const handleProviderSelect = useCallback(
+  const handleTextProviderSelect = useCallback(
     (next: LlmProvider) => {
-      if (next === aiProvider) return;
-      void setAiProvider(next);
+      if (next === textProvider) return;
+      void setTextProvider(next);
     },
-    [aiProvider, setAiProvider],
+    [setTextProvider, textProvider],
+  );
+
+  const handleImageProviderSelect = useCallback(
+    (next: LlmProvider) => {
+      if (next === imageProvider) return;
+      void setImageProvider(next);
+    },
+    [imageProvider, setImageProvider],
   );
 
   const handleModelSelect = useCallback(
@@ -316,28 +332,18 @@ export const UserProfileScreen = () => {
               multiline
             />
           </View>
-          <TouchableOpacity
-            style={[styles.secondaryButton, isSavingPrefs && styles.disabledButton]}
-            onPress={handleSavePreferences}
-            disabled={isSavingPrefs || prefsLoading}
-          >
-            <Text style={styles.secondaryButtonText}>
-              {isSavingPrefs ? "Saving..." : "Save preferences"}
-            </Text>
-          </TouchableOpacity>
-          {saveMessage ? <Text style={styles.statusText}>{saveMessage}</Text> : null}
         </View>
 
         <View style={styles.card}>
           <Text style={styles.sectionLabel}>AI</Text>
-          <Text style={styles.sectionHeading}>Local assistant routing</Text>
+          <Text style={styles.sectionHeading}>Text assistant routing</Text>
           <Text style={styles.helperText}>
             Choose how Fragments answers non-command chat messages. Both options keep prompts fully local and request a
             4K context window for better accuracy.
           </Text>
           <View style={styles.aiOptionGrid}>
             {aiOptions.map((option) => {
-              const isActive = aiProvider === option.key;
+              const isActive = textProvider === option.key;
               return (
                 <TouchableOpacity
                   key={option.key}
@@ -346,7 +352,7 @@ export const UserProfileScreen = () => {
                     isActive && styles.aiOptionCardActive,
                     option.disabled && styles.aiOptionCardDisabled,
                   ]}
-                  onPress={() => handleProviderSelect(option.key)}
+                  onPress={() => handleTextProviderSelect(option.key)}
                   disabled={option.disabled}
                 >
                   <Text style={styles.aiOptionLabel}>{option.title}</Text>
@@ -357,37 +363,77 @@ export const UserProfileScreen = () => {
               );
             })}
           </View>
-          {aiProvider === "openSource" ? (
-            <View style={styles.aiModelGrid}>
-              {Object.entries(ON_DEVICE_MODEL_MAP).map(([key, model]) => {
-                const typedKey = key as OnDeviceModelKey;
-                const isActive = modelKey === typedKey;
-                return (
-                  <TouchableOpacity
-                    key={key}
-                    style={[styles.aiOptionCard, isActive && styles.aiOptionCardActive]}
-                    onPress={() => handleModelSelect(typedKey)}
-                  >
-                    <Text style={styles.aiOptionLabel}>{model.label}</Text>
-                    <Text style={styles.aiOptionDescription}>{model.description}</Text>
-                    <Text style={styles.aiOptionFootnote}>
-                      {model.size} • {model.contextWindow.toLocaleString()} token window
-                    </Text>
-                    {isActive ? <Text style={styles.aiOptionBadge}>Selected</Text> : null}
-                  </TouchableOpacity>
-                );
-              })}
-              <Text style={styles.capsuleHint}>
-                Models download the first time you use the AI tab and live inside the device sandbox. Remove the app to
-                clear them.
-              </Text>
-            </View>
+          {textProvider === "openSource" ? (
+            <>
+              <View style={styles.aiModelGrid}>
+                {Object.entries(ON_DEVICE_MODEL_MAP).map(([key, model]) => {
+                  const typedKey = key as OnDeviceModelKey;
+                  const isActive = modelKey === typedKey;
+                  return (
+                    <TouchableOpacity
+                      key={key}
+                      style={[styles.aiOptionCard, isActive && styles.aiOptionCardActive]}
+                      onPress={() => handleModelSelect(typedKey)}
+                    >
+                      <Text style={styles.aiOptionLabel}>{model.label}</Text>
+                      <Text style={styles.aiOptionDescription}>{model.description}</Text>
+                      <Text style={styles.aiOptionFootnote}>
+                        {model.size} • {model.contextWindow.toLocaleString()} token window
+                      </Text>
+                      {isActive ? <Text style={styles.aiOptionBadge}>Selected</Text> : null}
+                    </TouchableOpacity>
+                  );
+                })}
+                <Text style={styles.capsuleHint}>
+                  Models download the first time you use the AI tab and live inside the device sandbox. Remove the app to
+                  clear them.
+                </Text>
+              </View>
+              <OnDeviceDownloadPanel modelKey={modelKey} />
+            </>
           ) : (
-              <Text style={styles.helperText}>
-                Apple&apos;s path expects you to wire up AIPromptSession/CoreLLM (or a similar bridge) inside the native
-                project so prompts never leave the phone.
-              </Text>
-            )}
+            <Text style={styles.helperText}>
+              Apple&apos;s path expects you to wire up AIPromptSession/CoreLLM (or a similar bridge) inside the native
+              project so prompts never leave the phone.
+            </Text>
+          )}
+          <View style={styles.aiDivider} />
+          <Text style={styles.sectionHeading}>Image generation</Text>
+          <Text style={styles.helperText}>
+            Pick how product art is generated when you tap Image Playground inside pantry forms.
+          </Text>
+          <View style={styles.aiOptionGrid}>
+            {aiOptions.map((option) => {
+              const isActive = imageProvider === option.key;
+              return (
+                <TouchableOpacity
+                  key={`${option.key}-image`}
+                  style={[
+                    styles.aiOptionCard,
+                    isActive && styles.aiOptionCardActive,
+                    option.disabled && styles.aiOptionCardDisabled,
+                  ]}
+                  onPress={() => handleImageProviderSelect(option.key)}
+                  disabled={option.disabled}
+                >
+                  <Text style={styles.aiOptionLabel}>{option.title}</Text>
+                  <Text style={styles.aiOptionDescription}>{option.description}</Text>
+                  <Text style={styles.aiOptionFootnote}>{option.footnote}</Text>
+                  {isActive ? <Text style={styles.aiOptionBadge}>Selected</Text> : null}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+          {imageProvider === "apple" ? (
+            <Text style={styles.helperText}>
+              Image Playground runs fully on-device on iOS 18.4+. We save the generated files locally before uploading to
+              Supabase.
+            </Text>
+          ) : (
+            <Text style={styles.helperText}>
+              Switch to Apple to unlock Image Playground ideas, or upload photos manually for now.
+            </Text>
+          )}
           <View style={styles.responseModeBlock}>
             <Text style={styles.sectionLabel}>Response length</Text>
             <Text style={styles.helperText}>
@@ -421,16 +467,16 @@ export const UserProfileScreen = () => {
     allergies,
     fragments,
     fragmentsLoading,
-    isSavingPrefs,
-    saveMessage,
     prefsLoading,
     aiOptions,
-    aiProvider,
-    handleProviderSelect,
+    textProvider,
+    handleTextProviderSelect,
     handleModelSelect,
     handleChatModeSelect,
     modelKey,
     chatMode,
+    imageProvider,
+    handleImageProviderSelect,
   ]);
 
   return (
@@ -451,6 +497,20 @@ export const UserProfileScreen = () => {
         })}
       </View>
       {sectionContent}
+      {activeSection === "Settings" ? (
+        <View style={styles.saveFooter}>
+          <TouchableOpacity
+            style={[styles.secondaryButton, isSavingPrefs && styles.disabledButton]}
+            onPress={handleSavePreferences}
+            disabled={isSavingPrefs || prefsLoading}
+          >
+            <Text style={styles.secondaryButtonText}>
+              {isSavingPrefs ? "Saving..." : "Save preferences"}
+            </Text>
+          </TouchableOpacity>
+          {saveMessage ? <Text style={styles.statusText}>{saveMessage}</Text> : null}
+        </View>
+      ) : null}
       <TouchableOpacity style={styles.logoutButton} onPress={() => supabase.auth.signOut()}>
         <Text style={styles.logoutText}>Log out</Text>
       </TouchableOpacity>
@@ -458,6 +518,77 @@ export const UserProfileScreen = () => {
         <Text style={styles.sessionHint}>Signed in as {session.user.email}</Text>
       ) : null}
     </ScrollView>
+  );
+};
+
+const OnDeviceDownloadPanel = ({ modelKey }: { modelKey: OnDeviceModelKey }) => {
+  const model = ON_DEVICE_MODEL_MAP[modelKey] ?? ON_DEVICE_MODEL_MAP[DEFAULT_ON_DEVICE_MODEL];
+  const [downloadRequested, setDownloadRequested] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const execModel = useExecModel(model.resource, downloadRequested) ?? EMPTY_EXEC_MODEL;
+  const downloadPercent = Math.round((execModel.downloadProgress || 0) * 100);
+  const isDownloading = downloadRequested && !execModel.ready;
+  const friendlyError =
+    execModel.error && typeof execModel.error === "object" && "message" in execModel.error
+      ? String((execModel.error as Error).message)
+      : execModel.error
+        ? String(execModel.error)
+        : null;
+
+  useEffect(() => {
+    if (downloadRequested && execModel.ready) {
+      setStatusMessage(`${model.label} downloaded to this device. You can chat right away.`);
+      setDownloadRequested(false);
+    }
+  }, [downloadRequested, execModel.ready, model.label]);
+
+  useEffect(() => {
+    setDownloadRequested(false);
+    setStatusMessage(null);
+  }, [modelKey]);
+
+  const handleStartDownload = () => {
+    setStatusMessage(null);
+    setDownloadRequested(true);
+  };
+
+  const handleCancel = () => {
+    execModel.interrupt?.();
+    setDownloadRequested(false);
+  };
+
+  return (
+    <View style={styles.downloadCard}>
+      <Text style={styles.sectionLabel}>Model download</Text>
+      <Text style={styles.helperText}>
+        Start the ExecuTorch download without opening the AI console. Keep Fragments in the foreground until it finishes.
+      </Text>
+      <TouchableOpacity
+        style={[styles.downloadButton, (isDownloading || execModel.ready) && styles.downloadButtonDisabled]}
+        onPress={handleStartDownload}
+        disabled={isDownloading || execModel.ready}
+      >
+        <Text style={styles.downloadButtonText}>
+          {isDownloading
+            ? `Downloading… ${downloadPercent}%`
+            : execModel.ready
+                ? `${model.label} already installed`
+                : `Download ${model.label}`}
+        </Text>
+      </TouchableOpacity>
+      {isDownloading ? (
+        <>
+          <View style={styles.downloadProgressTrack}>
+            <View style={[styles.downloadProgressFill, { width: `${downloadPercent}%` }]} />
+          </View>
+          <TouchableOpacity style={styles.downloadCancel} onPress={handleCancel}>
+            <Text style={styles.downloadCancelText}>Cancel download</Text>
+          </TouchableOpacity>
+        </>
+      ) : null}
+      {statusMessage ? <Text style={styles.statusText}>{statusMessage}</Text> : null}
+      {friendlyError ? <Text style={styles.statusText}>{friendlyError}</Text> : null}
+    </View>
   );
 };
 
@@ -735,6 +866,9 @@ const styles = StyleSheet.create({
     textAlign: "center",
     color: "rgba(255,255,255,0.5)",
   },
+  saveFooter: {
+    marginTop: 32,
+  },
   statusText: {
     marginTop: 8,
     color: "rgba(255,255,255,0.6)",
@@ -746,5 +880,50 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     color: "rgba(255,255,255,0.6)",
+  },
+  aiDivider: {
+    marginTop: 24,
+    marginBottom: 12,
+    borderBottomColor: "rgba(255,255,255,0.12)",
+    borderBottomWidth: 1,
+  },
+  downloadCard: {
+    marginTop: 16,
+    padding: 16,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    backgroundColor: "#10162b",
+    gap: 12,
+  },
+  downloadButton: {
+    borderRadius: 14,
+    paddingVertical: 12,
+    backgroundColor: "#1f2a44",
+    alignItems: "center",
+  },
+  downloadButtonDisabled: {
+    opacity: 0.6,
+  },
+  downloadButtonText: {
+    color: "#ffffff",
+    fontWeight: "600",
+  },
+  downloadProgressTrack: {
+    height: 8,
+    borderRadius: 6,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    overflow: "hidden",
+  },
+  downloadProgressFill: {
+    height: "100%",
+    backgroundColor: "#0fb06a",
+  },
+  downloadCancel: {
+    alignSelf: "flex-start",
+  },
+  downloadCancelText: {
+    color: "#f97316",
+    fontWeight: "600",
   },
 });

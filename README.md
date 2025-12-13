@@ -62,12 +62,8 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=<ANON_KEY from fragments-supabase/.env or Supabase
 
 Adjust these values if you change the local Supabase URL or keys.
 
-On-device AI via ExecuTorch does not require extra env vars. If you are wiring up an Apple Intelligence bridge, point these to your local HTTP shim:
-
-```env
-EXPO_PUBLIC_APPLE_LLM_URL=http://127.0.0.1:17890/v1/chat/completions
-EXPO_PUBLIC_APPLE_LLM_MODEL=apple-intelligence-preview
-```
+On-device AI via ExecuTorch and the Apple provider do not require extra env vars. The Apple option now talks directly to Apple
+Intelligence through the native `AppleLLMModule` (Swift), so be sure to build/run on iOS 18+ with the custom dev client.
 
 3. **Run the app**
 
@@ -201,10 +197,10 @@ FragmentsV/
     - `MapScreen` placeholder for future location‑aware features (e.g., nearby stores or shared pantries).
 
 - **Local LLM routing**
-  - User profile → **Settings → AI** switches between ExecuTorch-downloaded models and an optional Apple Intelligence bridge.
+  - User profile → **Settings → AI** switches between ExecuTorch-downloaded models and the Apple Intelligence provider.
   - The ExecuTorch option fetches Meta/Qwen `.pte` weights from Software Mansion’s HuggingFace mirror (≈0.8–2 GB) and keeps them inside the device sandbox with a 4K window.
-  - The Apple option expects an OpenAI-style HTTP shim around `AIPromptSession`/CoreLLM on iOS 18+; configure its URL with `EXPO_PUBLIC_APPLE_LLM_URL`.
-  - `scripts/local-llm/README.md` now documents the ExecuTorch requirements (new architecture build, disk usage) and how to stand up the Apple shim inside your native project.
+  - The Apple option now calls the native `AppleLLMModule` (Swift) that wraps Apple Intelligence / `AIPromptSession` directly on iOS 18+ builds. No HTTP shim or env vars required, but you must run a custom dev client on supported hardware.
+  - `scripts/local-llm/README.md` documents the ExecuTorch requirements (new architecture build, disk usage) and how to keep the Apple bridge enabled inside the native project.
 
 ### Local AI orchestrator & continue support
 
@@ -213,8 +209,8 @@ FragmentsV/
 - When no photos are attached, the new **Intent Parser** tool turns the user’s sentence into detected pantry items (respecting calories, protein, etc.) so text-only requests no longer trigger the generic seasoning demo.
 - If the user explicitly asks to “log” something, the orchestrator now builds `/log food { ... }` payloads with the detected calories/macros so meal tracking works end-to-end; pantry-style requests still go through `/add food`.
 - Both `/add food` and `/log food` commands now appear as pending system bubbles with a “Run” button so nothing touches the pantry or log until you explicitly confirm.
-- Assistant replies stream token-by-token on ExecuTorch (and the Apple shim) and now flag truncation more reliably. The built-in “Continue” button sends an explicit “Continue the last response verbatim…” prompt so long answers can spill over the configured 4K window without losing context.
-- All tool calls go through the same `callLocalModel` abstraction that powers chat, so whichever on-device LLM you pick (ExecuTorch `.pte` weights or the Apple bridge) is responsible for honoring the ~4K window, streaming, and JSON-only constraints enforced by the orchestrator prompts.
+- Assistant replies stream token-by-token on ExecuTorch (and the AppleLLMModule-backed provider) and now flag truncation more reliably. The built-in “Continue” button sends an explicit “Continue the last response verbatim…” prompt so long answers can spill over the configured 4K window without losing context.
+- All tool calls go through the same `callLocalModel` abstraction that powers chat, so whichever on-device LLM you pick (ExecuTorch `.pte` weights or Apple Intelligence) is responsible for honoring the ~4K window, streaming, and JSON-only constraints enforced by the orchestrator prompts.
 
 ## Supabase data (high‑level)
 

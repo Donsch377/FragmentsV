@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { Alert, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { RouteProp, useRoute } from "@react-navigation/native";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import type {
   RecipeDatabox,
   RecipeDefinition,
@@ -17,6 +18,11 @@ import { supabase } from "../lib/supabaseClient";
 import { useAuth } from "../providers/AuthProvider";
 import { ensureGroupMembership, fetchAccessibleGroups } from "../utils/groups";
 import { captureAuthDebugSnapshot, type AuthDebugSnapshot } from "../utils/authDebug";
+
+type PantryFoodOption = {
+  id: string;
+  name: string;
+};
 
 type RecipeCreatorDraft = {
   title: string;
@@ -68,6 +74,11 @@ export const RecipeCreatorScreen = () => {
   const [saving, setSaving] = useState(false);
   const initialRecipeDraft = route.params?.initialRecipe;
 
+  const [expandedStepIds, setExpandedStepIds] = useState<Record<string, boolean>>({});
+  const [pantryOptions, setPantryOptions] = useState<PantryFoodOption[]>([]);
+  const [linkingIngredientId, setLinkingIngredientId] = useState<string | null>(null);
+  const [linkModalVisible, setLinkModalVisible] = useState(false);
+
   const servingsNumber = Number(servings) || 0;
   const prepMinutes = Number(prepTime) || 0;
   const cookMinutes = Number(cookTime) || 0;
@@ -99,6 +110,35 @@ export const RecipeCreatorScreen = () => {
     };
     loadGroups();
   }, [session?.user?.id, route.params?.groupId]);
+
+  useEffect(() => {
+    const loadPantryFoods = async () => {
+      if (!selectedGroupId || !session?.user?.id) {
+        setPantryOptions([]);
+        return;
+      }
+      try {
+        const { data, error } = await supabase
+          .from("group_foods")
+          .select("id, food:foods(id, name)")
+          .eq("group_id", selectedGroupId)
+          .order("inserted_at", { ascending: false });
+        if (error) throw error;
+        const items: PantryFoodOption[] =
+          data
+            ?.map((row: any) => {
+              if (!row.food) return null;
+              return { id: row.food.id as string, name: row.food.name as string };
+            })
+            .filter(Boolean) ?? [];
+        setPantryOptions(items);
+      } catch (error) {
+        console.error("Failed to load pantry foods for recipe linking", error);
+        setPantryOptions([]);
+      }
+    };
+    loadPantryFoods();
+  }, [selectedGroupId, session?.user?.id]);
 
   useEffect(() => {
     if (!initialRecipeDraft) return;
@@ -197,6 +237,13 @@ export const RecipeCreatorScreen = () => {
         return { ...step, ingredientUsages: [...step.ingredientUsages, newUsage] };
       }),
     );
+  };
+
+  const toggleStepExpanded = (stepId: string) => {
+    setExpandedStepIds((prev) => ({
+      ...prev,
+      [stepId]: !prev[stepId],
+    }));
   };
 
   const updateStepIngredientUsage = (
@@ -520,19 +567,23 @@ export const RecipeCreatorScreen = () => {
           ) : null}
           {ingredients.map((ingredient) => (
             <View key={ingredient.id} style={styles.card}>
+              {(() => {
+                const linked = pantryOptions.find((item) => item.id === ingredient.linkedFoodId);
+                const linkLabel = linked ? linked.name : "Link pantry item (optional)";
+                return (
+                  <>
               <View style={styles.cardHeader}>
-                <Text style={styles.cardTitle}>{ingredient.label || "Ingredient"}</Text>
+                <TextInput
+                  style={[styles.input, styles.cardTitleInput]}
+                  placeholder="Ingredient name"
+                  placeholderTextColor="rgba(255,255,255,0.4)"
+                  value={ingredient.label}
+                  onChangeText={(text) => updateIngredient(ingredient.id, { label: text })}
+                />
                 <TouchableOpacity onPress={() => removeIngredient(ingredient.id)}>
                   <Text style={styles.removeText}>Remove</Text>
                 </TouchableOpacity>
               </View>
-              <TextInput
-                style={styles.input}
-                placeholder="Name / label"
-                placeholderTextColor="rgba(255,255,255,0.4)"
-                value={ingredient.label}
-                onChangeText={(text) => updateIngredient(ingredient.id, { label: text })}
-              />
               <View style={styles.row}>
                 <TextInput
                   style={[styles.input, styles.inputHalf]}
@@ -549,13 +600,34 @@ export const RecipeCreatorScreen = () => {
                   onChangeText={(text) => updateIngredient(ingredient.id, { unit: text })}
                 />
               </View>
-              <TextInput
-                style={styles.input}
-                placeholder="Linked pantry item (optional)"
-                placeholderTextColor="rgba(255,255,255,0.4)"
-                value={ingredient.linkedFoodId ?? ""}
-                onChangeText={(text) => updateIngredient(ingredient.id, { linkedFoodId: text })}
-              />
+              <TouchableOpacity
+                style={styles.linkRow}
+                activeOpacity={0.8}
+                onPress={() => {
+                  if (!selectedGroupId) {
+                    Alert.alert("Select a group", "Choose a pantry group before linking ingredients.");
+                    return;
+                  }
+                  setLinkingIngredientId(ingredient.id);
+                  setLinkModalVisible(true);
+                }}
+              >
+                <Ionicons
+                  name="link-outline"
+                  size={14}
+                  color="rgba(255,255,255,0.6)"
+                  style={styles.linkIcon}
+                />
+                <Text
+                  style={[styles.linkLabel, linked && styles.linkLabelActive]}
+                  numberOfLines={1}
+                >
+                  {linkLabel}
+                </Text>
+              </TouchableOpacity>
+                  </>
+                );
+              })()}
             </View>
           ))}
         </View>
@@ -568,116 +640,161 @@ export const RecipeCreatorScreen = () => {
             </TouchableOpacity>
           </View>
           {steps.length === 0 ? <Text style={styles.emptyText}>No steps added yet.</Text> : null}
-          {steps.map((step, index) => (
-            <View key={step.id} style={styles.card}>
-              <Text style={styles.cardTitle}>Step {index + 1}</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Describe this step"
-                placeholderTextColor="rgba(255,255,255,0.4)"
-                value={step.summary}
-                onChangeText={(text) => updateStep(step.id, { summary: text })}
-              />
-              <Text style={styles.subheading}>Uses ingredients</Text>
-              {ingredients.length === 0 ? (
-                <Text style={styles.emptyText}>Add ingredients to assign them to steps.</Text>
-              ) : (
-                ingredients.map((ingredient) => {
-                  const usage = step.ingredientUsages.find(
-                    (item) => item.ingredientId === ingredient.id,
-                  );
-                  const isSelected = Boolean(usage);
-                  return (
-                    <View key={ingredient.id} style={styles.usageRow}>
-                      <TouchableOpacity
-                        style={[
-                          styles.checkbox,
-                          isSelected && styles.checkboxSelected,
-                        ]}
-                        onPress={() => toggleStepIngredientUsage(step.id, ingredient.id)}
-                      >
-                        {isSelected ? <Text style={styles.checkboxLabel}>✔</Text> : null}
-                      </TouchableOpacity>
-                      <Text style={styles.usageLabel}>{ingredient.label || "Ingredient"}</Text>
-                      {isSelected ? (
-                        <TextInput
-                          style={[styles.input, styles.usageInput]}
-                          placeholder="Amount used"
-                          placeholderTextColor="rgba(255,255,255,0.4)"
-                          value={usage?.amount ?? ""}
-                          onChangeText={(text) =>
-                            updateStepIngredientUsage(step.id, ingredient.id, { amount: text })
-                          }
-                        />
-                      ) : null}
-                    </View>
-                  );
-                })
-              )}
-              {steps.length > 1 ? (
-                <>
-                  <Text style={styles.subheading}>Unlocked after</Text>
-                  <View style={styles.dependencyList}>
-                    {steps
-                      .filter((candidate) => candidate.id !== step.id)
-                      .map((candidate) => {
-                        const isRequired = step.requires.includes(candidate.id);
-                        return (
-                          <TouchableOpacity
-                            key={candidate.id}
-                            style={[
-                              styles.dependencyChip,
-                              isRequired && styles.dependencyChipActive,
-                            ]}
-                            onPress={() => toggleStepDependency(step.id, candidate.id)}
-                          >
-                            <Text
-                              style={[
-                                styles.dependencyText,
-                                isRequired && styles.dependencyTextActive,
-                              ]}
-                            >
-                              {candidate.summary || `Step ${steps.indexOf(candidate) + 1}`}
-                            </Text>
-                          </TouchableOpacity>
+          {steps.map((step, index) => {
+            const expanded = !!expandedStepIds[step.id];
+            const selectedIngredientCount = step.ingredientUsages.length;
+            const selectedDependencyCount = step.requires.length;
+            const selectedDataboxCount = step.databoxValues.length;
+            return (
+              <View key={step.id} style={styles.card}>
+                <Text style={styles.cardTitle}>Step {index + 1}</Text>
+                <TextInput
+                  style={[styles.input, styles.stepTitleInput]}
+                  placeholder="Step title"
+                  placeholderTextColor="rgba(255,255,255,0.4)"
+                  value={step.summary}
+                  onChangeText={(text) => updateStep(step.id, { summary: text })}
+                />
+                <TextInput
+                  style={[styles.input, styles.stepDescriptionInput]}
+                  placeholder="Detailed instructions (optional)"
+                  placeholderTextColor="rgba(255,255,255,0.4)"
+                  multiline
+                  value={step.notes ?? ""}
+                  onChangeText={(text) => updateStep(step.id, { notes: text })}
+                />
+
+                <TouchableOpacity
+                  style={styles.stepMetaRow}
+                  activeOpacity={0.8}
+                  onPress={() => toggleStepExpanded(step.id)}
+                >
+                  <Text style={styles.subheading}>Ingredients & timing</Text>
+                  <Text style={styles.stepMetaText} numberOfLines={1}>
+                    {selectedIngredientCount
+                      ? `${selectedIngredientCount} ingredient${selectedIngredientCount === 1 ? "" : "s"}`
+                      : "No ingredients"}
+                    {steps.length > 1 && selectedDependencyCount
+                      ? ` · ${selectedDependencyCount} dependency${selectedDependencyCount === 1 ? "" : "ies"}`
+                      : ""}
+                    {databoxes.length && selectedDataboxCount
+                      ? ` · ${selectedDataboxCount} databox`
+                      : ""}
+                  </Text>
+                  <Ionicons
+                    name={expanded ? "chevron-up" : "chevron-down"}
+                    size={16}
+                    color="rgba(255,255,255,0.7)"
+                  />
+                </TouchableOpacity>
+
+                {expanded ? (
+                  <>
+                    <Text style={styles.subheading}>Uses ingredients</Text>
+                    {ingredients.length === 0 ? (
+                      <Text style={styles.emptyText}>Add ingredients to assign them to steps.</Text>
+                    ) : (
+                      ingredients.map((ingredient) => {
+                        const usage = step.ingredientUsages.find(
+                          (item) => item.ingredientId === ingredient.id,
                         );
-                      })}
-                  </View>
-                </>
-              ) : null}
-              {databoxes.length ? (
-                <>
-                  <Text style={styles.subheading}>Databox references</Text>
-                  {databoxes.map((box) => {
-                    const assignment = step.databoxValues.find(
-                      (entry) => entry.databoxId === box.id,
-                    );
-                    const isActive = Boolean(assignment);
-                    return (
-                      <View key={box.id} style={styles.usageRow}>
-                        <TouchableOpacity
-                          style={[styles.checkbox, isActive && styles.checkboxSelected]}
-                          onPress={() => toggleStepDataboxReference(step.id, box.id)}
-                        >
-                          {isActive ? <Text style={styles.checkboxLabel}>✔</Text> : null}
-                        </TouchableOpacity>
-                        <Text style={styles.usageLabel}>{box.label}</Text>
-                        {isActive ? (
-                          <TextInput
-                            style={[styles.input, styles.usageInput]}
-                            placeholder="Value recorded during this step"
-                            placeholderTextColor="rgba(255,255,255,0.4)"
-                            value={assignment?.value ?? ""}
-                            onChangeText={(text) => updateStepDataboxValue(step.id, box.id, text)}
-                          />
-                        ) : null}
-                      </View>
-                    );
-                  })}
-                </>
-              ) : null}
-            </View>
-          ))}
+                        const isSelected = Boolean(usage);
+                        return (
+                          <View key={ingredient.id} style={styles.usageRow}>
+                            <TouchableOpacity
+                              style={[
+                                styles.checkbox,
+                                isSelected && styles.checkboxSelected,
+                              ]}
+                              onPress={() => toggleStepIngredientUsage(step.id, ingredient.id)}
+                            >
+                              {isSelected ? <Text style={styles.checkboxLabel}>✔</Text> : null}
+                            </TouchableOpacity>
+                            <Text style={styles.usageLabel}>{ingredient.label || "Ingredient"}</Text>
+                            {isSelected ? (
+                              <TextInput
+                                style={[styles.input, styles.usageInput]}
+                                placeholder="Amount used"
+                                placeholderTextColor="rgba(255,255,255,0.4)"
+                                value={usage?.amount ?? ""}
+                                onChangeText={(text) =>
+                                  updateStepIngredientUsage(step.id, ingredient.id, { amount: text })
+                                }
+                              />
+                            ) : null}
+                          </View>
+                        );
+                      })
+                    )}
+                    {steps.length > 1 ? (
+                      <>
+                        <Text style={styles.subheading}>Unlocked after</Text>
+                        <View style={styles.dependencyList}>
+                          {steps
+                            .filter((candidate) => candidate.id !== step.id)
+                            .map((candidate) => {
+                              const isRequired = step.requires.includes(candidate.id);
+                              return (
+                                <TouchableOpacity
+                                  key={candidate.id}
+                                  style={[
+                                    styles.dependencyChip,
+                                    isRequired && styles.dependencyChipActive,
+                                  ]}
+                                  onPress={() => toggleStepDependency(step.id, candidate.id)}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.dependencyText,
+                                      isRequired && styles.dependencyTextActive,
+                                    ]}
+                                  >
+                                    {candidate.summary || `Step ${steps.indexOf(candidate) + 1}`}
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            })}
+                        </View>
+                      </>
+                    ) : null}
+                    {databoxes.length ? (
+                      <>
+                        <Text style={styles.subheading}>Databox references</Text>
+                        {databoxes.map((box) => {
+                          const assignment = step.databoxValues.find(
+                            (entry) => entry.databoxId === box.id,
+                          );
+                          const isActive = Boolean(assignment);
+                          return (
+                            <View key={box.id} style={styles.usageRow}>
+                              <TouchableOpacity
+                                style={[styles.checkbox, isActive && styles.checkboxSelected]}
+                                onPress={() => toggleStepDataboxReference(step.id, box.id)}
+                              >
+                                {isActive ? <Text style={styles.checkboxLabel}>✔</Text> : null}
+                              </TouchableOpacity>
+                              <Text style={styles.usageLabel}>{box.label}</Text>
+                              {isActive ? (
+                                <TextInput
+                                  style={[styles.input, styles.usageInput]}
+                                  placeholder="Value recorded during this step"
+                                  placeholderTextColor="rgba(255,255,255,0.4)"
+                                  value={assignment?.value ?? ""}
+                                  onChangeText={(text) =>
+                                    updateStepDataboxValue(step.id, box.id, text)
+                                  }
+                                />
+                              ) : null}
+                            </View>
+                          );
+                        })}
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
+              </View>
+            );
+          })}
         </View>
 
         <View style={styles.section}>
@@ -779,6 +896,58 @@ export const RecipeCreatorScreen = () => {
           <Text style={styles.primaryButtonText}>{saving ? "Saving..." : "Save recipe"}</Text>
         </TouchableOpacity>
 
+        <Modal
+          visible={linkModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setLinkModalVisible(false)}
+        >
+          <View style={styles.modalBackdrop}>
+            <View style={styles.modalCard}>
+              <Text style={styles.modalTitle}>Link pantry item</Text>
+              <ScrollView style={styles.modalList} showsVerticalScrollIndicator={false}>
+                {pantryOptions.length ? (
+                  pantryOptions.map((item) => (
+                    <TouchableOpacity
+                      key={item.id}
+                      style={styles.modalOption}
+                      onPress={() => {
+                        if (linkingIngredientId) {
+                          updateIngredient(linkingIngredientId, { linkedFoodId: item.id });
+                        }
+                        setLinkModalVisible(false);
+                      }}
+                    >
+                      <Text style={styles.modalOptionText}>{item.name}</Text>
+                    </TouchableOpacity>
+                  ))
+                ) : (
+                  <Text style={styles.emptyText}>
+                    No foods found in this group. Add items to your pantry first.
+                  </Text>
+                )}
+                {linkingIngredientId ? (
+                  <TouchableOpacity
+                    style={styles.modalOption}
+                    onPress={() => {
+                      updateIngredient(linkingIngredientId, { linkedFoodId: "" });
+                      setLinkModalVisible(false);
+                    }}
+                  >
+                    <Text style={styles.modalClearText}>Clear link</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </ScrollView>
+              <TouchableOpacity
+                style={styles.modalCloseButton}
+                onPress={() => setLinkModalVisible(false)}
+              >
+                <Text style={styles.modalCloseText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
         {savedRecipe ? (
           <View style={styles.section}>
             <Text style={styles.sectionHeading}>Structured recipe JSON</Text>
@@ -874,11 +1043,15 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+    gap: 8,
   },
   cardTitle: {
     color: "#ffffff",
     fontWeight: "600",
     fontSize: 16,
+  },
+  cardTitleInput: {
+    flex: 1,
   },
   removeText: {
     color: "#ff7a7a",
@@ -1067,5 +1240,89 @@ const styles = StyleSheet.create({
   },
   groupDropdownLabelActive: {
     color: "#0fb06a",
+  },
+  linkRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 4,
+    gap: 6,
+  },
+  linkIcon: {
+    marginLeft: 2,
+  },
+  linkInput: {
+    flex: 1,
+  },
+  linkLabel: {
+    flex: 1,
+    fontSize: 13,
+    color: "rgba(255,255,255,0.6)",
+  },
+  linkLabelActive: {
+    color: "#ffffff",
+  },
+  stepTitleInput: {},
+  stepDescriptionInput: {
+    minHeight: 60,
+    textAlignVertical: "top",
+  },
+  stepMetaRow: {
+    marginTop: 8,
+    paddingVertical: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  stepMetaText: {
+    flex: 1,
+    fontSize: 12,
+    color: "rgba(255,255,255,0.7)",
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  modalCard: {
+    width: "86%",
+    maxHeight: "70%",
+    borderRadius: 18,
+    padding: 16,
+    backgroundColor: "#050810",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.15)",
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#ffffff",
+    marginBottom: 8,
+  },
+  modalList: {
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  modalOption: {
+    paddingVertical: 10,
+  },
+  modalOptionText: {
+    color: "#ffffff",
+    fontSize: 15,
+  },
+  modalClearText: {
+    color: "#ff7a7a",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  modalCloseButton: {
+    marginTop: 8,
+    alignSelf: "flex-end",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  modalCloseText: {
+    color: "rgba(255,255,255,0.8)",
+    fontSize: 14,
   },
 });

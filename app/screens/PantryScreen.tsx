@@ -4,8 +4,10 @@ import {
   Alert,
   Animated,
   Dimensions,
+  Easing,
   FlatList,
   Image,
+  PanResponder,
   Platform,
   Pressable,
   RefreshControl,
@@ -42,6 +44,12 @@ const NUTRIENT_DISPLAY = [
   { key: "sodium_mg", label: "Sodium", unit: "mg" },
 ] as const;
 type NutrientKey = (typeof NUTRIENT_DISPLAY)[number]["key"];
+
+const VISUAL_BUBBLE_SIZES = [96, 84, 70, 58];
+const RING_BASE_RADIUS = 95;
+const RING_RADIUS_STEP = 55;
+const RING_BASE_SLOTS = 6;
+const RING_SLOT_STEP = 4;
 
 type Food = {
   id: string;
@@ -127,6 +135,40 @@ export const PantryScreen = () => {
   } | null>(null);
   const restoreDetailAfterModalRef = useRef(false);
 
+  const [viewMode, setViewMode] = useState<"list" | "visual">("list");
+  const [sortMode, setSortMode] = useState<"az" | "expiring" | "recent">("recent");
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [bubbleAreaSize, setBubbleAreaSize] = useState({ width: 0, height: 0 });
+  const bubblePan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
+  const bubblePanOffset = useRef({ x: 0, y: 0 });
+  const bubblePanResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gestureState) =>
+        Math.abs(gestureState.dx) > 6 || Math.abs(gestureState.dy) > 6,
+      onPanResponderGrant: () => {
+        bubblePan.stopAnimation();
+      },
+      onPanResponderMove: (_, gestureState) => {
+        bubblePan.setValue({
+          x: bubblePanOffset.current.x + gestureState.dx,
+          y: bubblePanOffset.current.y + gestureState.dy,
+        });
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        bubblePanOffset.current = {
+          x: bubblePanOffset.current.x + gestureState.dx,
+          y: bubblePanOffset.current.y + gestureState.dy,
+        };
+      },
+      onPanResponderTerminate: (_, gestureState) => {
+        bubblePanOffset.current = {
+          x: bubblePanOffset.current.x + gestureState.dx,
+          y: bubblePanOffset.current.y + gestureState.dy,
+        };
+      },
+    }),
+  ).current;
+
   const selectedGroupName = useMemo(() => {
     const match = groupOptions.find((option) => option.id === selectedGroupId);
     return match?.name ?? "";
@@ -140,6 +182,60 @@ export const PantryScreen = () => {
       return null;
     }
   }, [activeRecipe?.instructions]);
+
+  const bubbleLayouts = useMemo(() => {
+    if (!bubbleAreaSize.width || !bubbleAreaSize.height) return [];
+    const centerX = bubbleAreaSize.width / 2;
+    const centerY = bubbleAreaSize.height / 2;
+    const layouts: { food: Food; size: number; left: number; top: number }[] = [];
+
+    const getRingSpec = (ringIndex: number) => {
+      if (ringIndex === 0) {
+        return { radius: 0, slots: 1 };
+      }
+      return {
+        radius: RING_BASE_RADIUS + (ringIndex - 1) * RING_RADIUS_STEP,
+        slots: RING_BASE_SLOTS + (ringIndex - 1) * RING_SLOT_STEP,
+      };
+    };
+
+    let orbitCounter = 0;
+    foods.forEach((food, index) => {
+      const size = VISUAL_BUBBLE_SIZES[index % VISUAL_BUBBLE_SIZES.length];
+      if (index === 0) {
+        layouts.push({
+          food,
+          size,
+          left: centerX - size / 2,
+          top: centerY - size / 2,
+        });
+        return;
+      }
+      let ringIndex = 1;
+      let slotIndex = orbitCounter;
+      let spec = getRingSpec(ringIndex);
+
+      while (slotIndex >= spec.slots) {
+        slotIndex -= spec.slots;
+        ringIndex += 1;
+        spec = getRingSpec(ringIndex);
+      }
+
+      const angle = (2 * Math.PI * slotIndex) / spec.slots - Math.PI / 2;
+      const left = centerX + spec.radius * Math.cos(angle) - size / 2;
+      const top = centerY + spec.radius * Math.sin(angle) - size / 2;
+
+      layouts.push({
+        food,
+        size,
+        left,
+        top,
+      });
+      orbitCounter += 1;
+    });
+
+    return layouts;
+  }, [foods, bubbleAreaSize]);
 
   const loadFoods = useCallback(async () => {
     if (!selectedGroupId) {
@@ -237,6 +333,72 @@ export const PantryScreen = () => {
     }
     const rootNav = navigation.getParent();
     rootNav?.navigate("RecipeCreator", { groupId: selectedGroupId });
+  };
+
+  const handleEditRecipe = () => {
+    if (!activeRecipe) {
+      return;
+    }
+    const rootNav = navigation.getParent();
+    const groupId = activeRecipe.group_id ?? selectedGroupId ?? null;
+    const instructions = structuredActiveRecipe as
+      | {
+          ingredients?: any[];
+          steps?: any[];
+          nutrition?: any[];
+          databoxes?: any[];
+        }
+      | null;
+    const initialRecipe = {
+      title: activeRecipe.name,
+      prepTimeMinutes: activeRecipe.prep_time ? Number(activeRecipe.prep_time) || undefined : undefined,
+      cookTimeMinutes: undefined,
+      servings: activeRecipe.servings ? Number(activeRecipe.servings) || undefined : undefined,
+      groupId,
+      ingredients: instructions?.ingredients ?? [],
+      steps: instructions?.steps ?? [],
+      nutrition: instructions?.nutrition ?? [],
+      databoxes: instructions?.databoxes ?? [],
+    };
+    rootNav?.navigate("RecipeCreator", { groupId, initialRecipe });
+  };
+
+  const handleCookNow = () => {
+    if (!activeRecipe) {
+      return;
+    }
+    const rootNav = navigation.getParent();
+    const groupId = activeRecipe.group_id ?? selectedGroupId ?? null;
+    const instructions = structuredActiveRecipe as
+      | {
+          ingredients?: any[];
+          steps?: any[];
+          nutrition?: any[];
+          databoxes?: any[];
+        }
+      | null;
+    const recipePayload = instructions
+      ? {
+          title: activeRecipe.name,
+          prepTimeMinutes: activeRecipe.prep_time ? Number(activeRecipe.prep_time) || undefined : undefined,
+          cookTimeMinutes: undefined,
+          servings: activeRecipe.servings ? Number(activeRecipe.servings) || undefined : undefined,
+          ingredients: instructions.ingredients ?? [],
+          steps: instructions.steps ?? [],
+          nutrition: instructions.nutrition ?? [],
+          databoxes: instructions.databoxes ?? [],
+        }
+      : {
+          title: activeRecipe.name,
+          prepTimeMinutes: activeRecipe.prep_time ? Number(activeRecipe.prep_time) || undefined : undefined,
+          cookTimeMinutes: undefined,
+          servings: activeRecipe.servings ? Number(activeRecipe.servings) || undefined : undefined,
+          ingredients: [],
+          steps: [],
+          nutrition: [],
+          databoxes: [],
+        };
+    rootNav?.navigate("RecipeCook", { recipe: recipePayload });
   };
 
   const loadGroupOptions = useCallback(async () => {
@@ -605,6 +767,7 @@ export const PantryScreen = () => {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.scrollContent}
         alwaysBounceVertical
+        scrollEnabled={viewMode !== "visual"}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -613,73 +776,111 @@ export const PantryScreen = () => {
           />
         }
       >
-        <View style={styles.inventoryCard}>
-          <View style={styles.inventoryHeader}>
-          <Text style={styles.inventoryHeading}>Inventory view</Text>
+        <View style={styles.inventoryBar}>
+          <View style={styles.inventoryColumn}>
+            <Text style={styles.inventoryLabel}>Group</Text>
             {groupOptions.length ? (
               <Pressable
                 style={styles.groupSelector}
                 onPress={() => setShowGroupMenu((prev) => !prev)}
               >
                 <Text style={styles.groupSelectorText} numberOfLines={1} ellipsizeMode="tail">
-                  {selectedGroupName || groupOptions[0]?.name || "your"} pantry
+                  {selectedGroupName || groupOptions[0]?.name || "Solo"}
                 </Text>
-                <Text style={styles.groupSelectorCaret}>{showGroupMenu ? "▲" : "▼"}</Text>
+                <Text
+                  style={[
+                    styles.groupSelectorCaret,
+                    showGroupMenu && styles.groupSelectorCaretActive,
+                  ]}
+                >
+                  {showGroupMenu ? "▲" : "▼"}
+                </Text>
               </Pressable>
-            ) : null}
+            ) : (
+              <Text style={styles.helperText}>Create a group to start a pantry.</Text>
+            )}
           </View>
-          {showGroupMenu && groupOptions.length ? (
-            <View style={styles.groupDropdown}>
-              {groupOptions.map((group) => (
+          <View style={[styles.inventoryColumn, styles.inventoryColumnCompact]}>
+            <Text style={styles.inventoryLabel}>View</Text>
+            <View style={styles.viewToggleRow}>
+              {(["list", "visual"] as const).map((mode) => {
+                const isActive = viewMode === mode;
+                return (
+                  <TouchableOpacity
+                    key={mode}
+                    style={[styles.viewToggleChip, isActive && styles.viewToggleChipActive]}
+                    onPress={() => setViewMode(mode)}
+                  >
+                    <Text
+                      style={[styles.viewToggleText, isActive && styles.viewToggleTextActive]}
+                    >
+                      {mode === "list" ? "List" : "Visual"}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        </View>
+        {showGroupMenu && groupOptions.length ? (
+          <View style={styles.groupDropdown}>
+            {groupOptions.map((group) => {
+              const isActive = selectedGroupId === group.id;
+              return (
                 <TouchableOpacity
                   key={group.id}
-                  style={[
-                    styles.groupDropdownItem,
-                    selectedGroupId === group.id && styles.groupDropdownItemActive,
-                  ]}
+                  style={[styles.groupDropdownItem, isActive && styles.groupDropdownItemActive]}
                   onPress={() => {
                     setSelectedGroupId(group.id);
                     setShowGroupMenu(false);
                   }}
                 >
-                  <Text
-                    style={[
-                      styles.groupDropdownLabel,
-                      selectedGroupId === group.id && styles.groupDropdownLabelActive,
-                    ]}
-                  >
-                    {group.name}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          ) : null}
-          <View style={styles.tabRow}>
-            {PANTRY_TAB_OPTIONS.map((tab, index) => {
-              const isActive = activeTab === tab;
-              return (
-                <TouchableOpacity
-                  key={tab}
-                  style={[
-                    styles.tabButton,
-                    index > 0 && styles.tabButtonSpacing,
-                    isActive && styles.tabButtonActive,
-                  ]}
-                  onPress={() => setActiveTab(tab)}
-                  activeOpacity={0.92}
-                >
-                  <Text style={[styles.tabLabel, isActive && styles.tabLabelActive]}>{tab}</Text>
+                  <View style={styles.groupDropdownItemContent}>
+                    <View style={styles.groupDropdownTextBlock}>
+                      <Text
+                        style={[
+                          styles.groupDropdownLabel,
+                          isActive && styles.groupDropdownLabelActive,
+                        ]}
+                      >
+                        {group.name}
+                      </Text>
+                      {isActive ? (
+                        <Text style={styles.groupDropdownSelectedHint}>Selected</Text>
+                      ) : null}
+                    </View>
+                    {isActive ? <Text style={styles.groupDropdownCheck}>✓</Text> : null}
+                  </View>
                 </TouchableOpacity>
               );
             })}
           </View>
+        ) : null}
+
+        <View style={styles.tabRow}>
+          {PANTRY_TAB_OPTIONS.map((tab, index) => {
+            const isActive = activeTab === tab;
+            return (
+              <TouchableOpacity
+                key={tab}
+                style={[
+                  styles.tabButton,
+                  index > 0 && styles.tabButtonSpacing,
+                  isActive && styles.tabButtonActive,
+                ]}
+                onPress={() => setActiveTab(tab)}
+                activeOpacity={0.92}
+              >
+                <Text style={[styles.tabLabel, isActive && styles.tabLabelActive]}>{tab}</Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
 
         {activeTab === "Foods" ? (
           <View style={styles.gridCard}>
             <View style={styles.gridHeader}>
               <View>
-                <Text style={styles.gridTitle}>Foods</Text>
                 <Text style={styles.gridSubtitle}>{foods.length} items</Text>
               </View>
               <TouchableOpacity
@@ -690,23 +891,102 @@ export const PantryScreen = () => {
                 <Text style={styles.createRecipeButtonText}>Add food</Text>
               </TouchableOpacity>
             </View>
+            <View style={styles.sortFilterRow}>
+              <View style={styles.sortChipRow}>
+                {[
+                  { key: "recent", label: "Recently added" },
+                  { key: "az", label: "A–Z" },
+                  { key: "expiring", label: "Expiring soon" },
+                ].map((option) => {
+                  const key = option.key as typeof sortMode;
+                  const isActive = sortMode === key;
+                  return (
+                    <TouchableOpacity
+                      key={key}
+                      style={[styles.sortChip, isActive && styles.sortChipActive]}
+                      onPress={() => setSortMode(key)}
+                    >
+                      <Text
+                        style={[styles.sortChipText, isActive && styles.sortChipTextActive]}
+                      >
+                        {option.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <View style={styles.sortChipRow}>
+                {["All", "Spices", "Drinks", "Frozen"].map((label) => {
+                  const isActive = (categoryFilter ?? "All") === label;
+                  return (
+                    <TouchableOpacity
+                      key={label}
+                      style={[styles.filterChip, isActive && styles.filterChipActive]}
+                      onPress={() => setCategoryFilter(label === "All" ? null : label)}
+                    >
+                      <Text
+                        style={[
+                          styles.filterChipText,
+                          isActive && styles.filterChipTextActive,
+                        ]}
+                      >
+                        {label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
             {isFetchingFoods ? (
               <View style={styles.loadingState}>
                 <ActivityIndicator color="#0fb06a" />
                 <Text style={styles.loadingText}>Loading pantry...</Text>
               </View>
             ) : foods.length ? (
-              <FlatList
-                data={foods}
-                numColumns={2}
-                scrollEnabled={false}
-                keyExtractor={(item) => item.id}
-                columnWrapperStyle={{ gap: 12 }}
-                contentContainerStyle={{ gap: 12 }}
-                renderItem={({ item }) => (
-                  <FoodCard food={item} onPress={handleSelectFood} onDelete={handleDeleteFood} />
-                )}
-              />
+              viewMode === "visual" ? (
+                <View
+                  style={styles.foodBubbleViewport}
+                  onLayout={(event) => {
+                    const { width, height } = event.nativeEvent.layout;
+                    if (width !== bubbleAreaSize.width || height !== bubbleAreaSize.height) {
+                      setBubbleAreaSize({ width, height });
+                    }
+                  }}
+                >
+                  <Animated.View
+                    style={[styles.foodBubbleCloud, { transform: bubblePan.getTranslateTransform() }]}
+                    {...bubblePanResponder.panHandlers}
+                  >
+                    {bubbleLayouts.map((layout, index) => (
+                      <FoodBubble
+                        key={layout.food.id}
+                        food={layout.food}
+                        size={layout.size}
+                        left={layout.left}
+                        top={layout.top}
+                        sway={index === 0 ? 1.2 : 4}
+                        onPress={handleSelectFood}
+                        onDelete={handleDeleteFood}
+                      />
+                    ))}
+                  </Animated.View>
+                </View>
+              ) : (
+                <FlatList
+                  key="food-list-mode"
+                  data={foods}
+                  scrollEnabled={false}
+                  keyExtractor={(item) => item.id}
+                  ItemSeparatorComponent={() => <View style={styles.listDivider} />}
+                  renderItem={({ item }) => (
+                    <FoodRow
+                      food={item}
+                      onPress={handleSelectFood}
+                      onDelete={handleDeleteFood}
+                    />
+                  )}
+                />
+              )
             ) : (
               <View style={styles.emptyState}>
                 <Text style={styles.emptyTitle}>Nothing here yet</Text>
@@ -1107,8 +1387,20 @@ export const PantryScreen = () => {
                   )}
                 </View>
                 <View style={styles.actionRow}>
-                  {["Cook now", "Schedule", "Share"].map((action) => (
-                    <TouchableOpacity key={action} style={styles.actionButton}>
+                  {["Cook now", "Edit", "Share"].map((action) => (
+                    <TouchableOpacity
+                      key={action}
+                      style={styles.actionButton}
+                      onPress={() => {
+                        if (action === "Cook now") {
+                          handleCookNow();
+                        } else if (action === "Edit") {
+                          handleEditRecipe();
+                        } else if (action === "Share") {
+                          Alert.alert("Coming soon", "Sharing this recipe is not implemented yet.");
+                        }
+                      }}
+                    >
                       <Text style={styles.actionButtonText}>{action}</Text>
                     </TouchableOpacity>
                   ))}
@@ -1119,6 +1411,92 @@ export const PantryScreen = () => {
         </>
       ) : null}
     </SafeAreaView>
+  );
+};
+
+type FoodBubbleProps = {
+  food: Food;
+  size: number;
+  left: number;
+  top: number;
+  sway: number;
+  onPress: (food: Food, layout: { x: number; y: number; width: number; height: number }) => void;
+  onDelete: (food: Food) => void;
+};
+
+const FoodBubble = ({ food, size, left, top, sway, onPress, onDelete }: FoodBubbleProps) => {
+  const bubbleRef = useRef<View>(null);
+  const [isPressed, setIsPressed] = useState(false);
+  const drift = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
+
+  useEffect(() => {
+    let mounted = true;
+    const animate = () => {
+      if (!mounted) return;
+      const next = {
+        x: (Math.random() - 0.5) * sway * 2,
+        y: (Math.random() - 0.5) * sway * 2,
+      };
+      Animated.timing(drift, {
+        toValue: next,
+        duration: 3500 + Math.random() * 2000,
+        easing: Easing.inOut(Easing.quad),
+        useNativeDriver: true,
+      }).start(() => {
+        if (mounted) {
+          animate();
+        }
+      });
+    };
+    animate();
+    return () => {
+      mounted = false;
+      drift.stopAnimation();
+    };
+  }, [drift, sway]);
+
+  const handlePress = () => {
+    bubbleRef.current?.measureInWindow((x, y, width, height) => {
+      setIsPressed(false);
+      onPress(food, { x, y, width, height });
+    });
+  };
+
+  return (
+    <Animated.View
+      style={[
+        styles.foodBubbleWrapper,
+        { left, top, width: size, height: size, borderRadius: size / 2 },
+        { transform: [{ translateX: drift.x }, { translateY: drift.y }] },
+      ]}
+    >
+      <TouchableOpacity
+        ref={bubbleRef}
+        activeOpacity={0.92}
+        onPressIn={() => setIsPressed(true)}
+        onPressOut={() => setIsPressed(false)}
+        onPress={handlePress}
+        style={[
+          styles.foodBubble,
+          isPressed && styles.foodBubblePressed,
+          { width: size, height: size, borderRadius: size / 2 },
+        ]}
+      >
+        <Image
+          source={{ uri: food.image_url || DEFAULT_FOOD_IMAGE }}
+          style={[styles.foodBubbleImage, { width: size, height: size, borderRadius: size / 2 }]}
+        />
+        <TouchableOpacity
+          style={styles.foodBubbleDelete}
+          onPress={(event) => {
+            event.stopPropagation();
+            onDelete(food);
+          }}
+        >
+          <Text style={styles.foodBubbleDeleteText}>×</Text>
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Animated.View>
   );
 };
 
@@ -1174,6 +1552,49 @@ const FoodCard = ({ food, onPress, onDelete }: FoodCardProps) => {
   );
 };
 
+type FoodRowProps = {
+  food: Food;
+  onPress: (food: Food, layout: { x: number; y: number; width: number; height: number }) => void;
+  onDelete: (food: Food) => void;
+};
+
+const FoodRow = ({ food, onPress, onDelete }: FoodRowProps) => {
+  const rowRef = useRef<View>(null);
+  const handlePress = () => {
+    rowRef.current?.measureInWindow((x, y, width, height) => {
+      onPress(food, { x, y, width, height });
+    });
+  };
+  return (
+    <TouchableOpacity
+      ref={rowRef}
+      activeOpacity={0.9}
+      style={styles.foodRow}
+      onPress={handlePress}
+    >
+      <Image source={{ uri: food.image_url || DEFAULT_FOOD_IMAGE }} style={styles.foodRowImage} />
+      <View style={styles.foodRowText}>
+        <Text style={styles.foodRowName} numberOfLines={1}>
+          {food.name}
+        </Text>
+        <Text style={styles.foodRowMeta} numberOfLines={1}>
+          {food.location || "Unassigned location"}
+          {food.best_by ? ` · Best by ${formatDate(food.best_by)}` : ""}
+        </Text>
+      </View>
+      <TouchableOpacity
+        style={styles.foodRowDelete}
+        onPress={(event) => {
+          event.stopPropagation();
+          onDelete(food);
+        }}
+      >
+        <Text style={styles.foodDeleteText}>×</Text>
+      </TouchableOpacity>
+    </TouchableOpacity>
+  );
+};
+
 type RecipeCardProps = {
   recipe: Recipe;
   onPress: (recipe: Recipe, layout: { x: number; y: number; width: number; height: number }) => void;
@@ -1208,9 +1629,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#060a13",
   },
   scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 32,
-    paddingBottom: 64,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 48,
     flexGrow: 1,
     backgroundColor: "#060a13",
   },
@@ -1221,38 +1642,39 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     textTransform: "uppercase",
   },
-  inventoryCard: {
-    marginTop: 0,
-    borderRadius: 24,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
-    backgroundColor: "#0b1120",
-    padding: 16,
-  },
-  inventoryHeading: {
-    fontSize: 14,
-    fontWeight: "600",
-    textTransform: "uppercase",
-    letterSpacing: 1,
-    color: "rgba(255,255,255,0.6)",
-  },
-  inventoryHeader: {
+  inventoryBar: {
+    marginBottom: 12,
     flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 12,
+    flexWrap: "wrap",
+    alignItems: "flex-start",
+    gap: 16,
+  },
+  inventoryColumn: {
+    flex: 1,
+    minWidth: 160,
+    gap: 6,
+  },
+  inventoryColumnCompact: {
+    flexGrow: 0,
+    minWidth: 140,
+  },
+  inventoryLabel: {
+    fontSize: 11,
+    textTransform: "uppercase",
+    letterSpacing: 2,
+    color: "rgba(255,255,255,0.45)",
   },
   tabRow: {
     flexDirection: "row",
-    marginTop: 12,
+    marginTop: 8,
   },
   tabButton: {
     flex: 1,
-    borderRadius: 18,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: "transparent",
     backgroundColor: "#0b152e",
-    paddingVertical: 12,
+    paddingVertical: 8,
   },
   tabButtonSpacing: {
     marginLeft: 8,
@@ -1263,7 +1685,7 @@ const styles = StyleSheet.create({
   },
   tabLabel: {
     textAlign: "center",
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "600",
     color: "rgba(255,255,255,0.5)",
   },
@@ -1271,12 +1693,13 @@ const styles = StyleSheet.create({
     color: "#ffffff",
   },
   gridCard: {
-    marginTop: 24,
-    borderRadius: 28,
+    marginTop: 12,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.15)",
     backgroundColor: "#0d1523",
-    padding: 20,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
   },
   gridHeader: {
     flexDirection: "row",
@@ -1285,8 +1708,8 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   createRecipeButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderRadius: 999,
     backgroundColor: "#0fb06a",
   },
@@ -1306,11 +1729,64 @@ const styles = StyleSheet.create({
   },
   loadingState: {
     alignItems: "center",
-    paddingVertical: 32,
+    paddingVertical: 20,
     gap: 8,
   },
   loadingText: {
     color: "rgba(255,255,255,0.7)",
+  },
+  foodBubbleViewport: {
+    width: "100%",
+    height: 340,
+    overflow: "hidden",
+    borderRadius: 24,
+    backgroundColor: "#0c1322",
+  },
+  foodBubbleCloud: {
+    flex: 1,
+    minHeight: 340,
+    padding: 12,
+    position: "relative",
+  },
+  foodBubbleWrapper: {
+    position: "absolute",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  foodBubble: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    backgroundColor: "#131b2c",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.35,
+    shadowOffset: { width: 0, height: 8 },
+    shadowRadius: 18,
+    elevation: 4,
+  },
+  foodBubblePressed: {
+    transform: [{ scale: 0.96 }],
+  },
+  foodBubbleImage: {
+    width: "100%",
+    height: "100%",
+  },
+  foodBubbleDelete: {
+    position: "absolute",
+    top: 6,
+    right: 6,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.5)",
+  },
+  foodBubbleDeleteText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "700",
   },
   foodCard: {
     flex: 1,
@@ -1369,20 +1845,18 @@ const styles = StyleSheet.create({
   },
   helperText: {
     fontSize: 12,
-    color: "rgba(255,255,255,0.5)",
+    color: "rgba(255,255,255,0.6)",
     lineHeight: 16,
   },
   groupSelector: {
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.15)",
+    borderColor: "rgba(255,255,255,0.25)",
     paddingHorizontal: 14,
     paddingVertical: 8,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    flexShrink: 1,
-    maxWidth: "65%",
   },
   groupSelectorText: {
     color: "#ffffff",
@@ -1390,8 +1864,11 @@ const styles = StyleSheet.create({
     flexShrink: 1,
   },
   groupSelectorCaret: {
-    color: "rgba(255,255,255,0.6)",
+    color: "rgba(255,255,255,0.75)",
     fontSize: 12,
+  },
+  groupSelectorCaretActive: {
+    color: "#0fb06a",
   },
   groupDropdown: {
     marginTop: 8,
@@ -1409,12 +1886,34 @@ const styles = StyleSheet.create({
   groupDropdownItemActive: {
     backgroundColor: "rgba(15,176,106,0.12)",
   },
+  groupDropdownItemContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  groupDropdownTextBlock: {
+    flex: 1,
+  },
   groupDropdownLabel: {
     color: "rgba(255,255,255,0.7)",
     fontWeight: "600",
+    fontSize: 15,
   },
   groupDropdownLabelActive: {
     color: "#0fb06a",
+  },
+  groupDropdownSelectedHint: {
+    marginTop: 2,
+    fontSize: 12,
+    color: "#0fb06a",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+  groupDropdownCheck: {
+    fontSize: 16,
+    color: "#0fb06a",
+    fontWeight: "700",
   },
   foodCardPressed: {
     transform: [{ scale: 0.98 }],
@@ -1520,9 +2019,9 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   detailScroll: {
-    paddingHorizontal: 24,
-    paddingTop: 12,
-    paddingBottom: 24,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 20,
     gap: 16,
   },
   detailScrollWrapper: {
@@ -1576,7 +2075,7 @@ const styles = StyleSheet.create({
   actionRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginTop: 12,
+    marginTop: 10,
   },
   actionButton: {
     flex: 1,
@@ -1646,5 +2145,111 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.55)",
     fontSize: 11,
     marginTop: 2,
+  },
+  viewToggleRow: {
+    flexDirection: "row",
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.15)",
+    padding: 2,
+    width: "100%",
+  },
+  viewToggleChip: {
+    flex: 1,
+    borderRadius: 999,
+    paddingVertical: 4,
+    alignItems: "center",
+  },
+  viewToggleChipActive: {
+    backgroundColor: "#1b2337",
+  },
+  viewToggleText: {
+    fontSize: 12,
+    color: "rgba(255,255,255,0.6)",
+  },
+  viewToggleTextActive: {
+    color: "#ffffff",
+    fontWeight: "600",
+  },
+  sortFilterRow: {
+    marginTop: 8,
+    marginBottom: 8,
+    gap: 4,
+  },
+  sortChipRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  sortChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+  },
+  sortChipActive: {
+    backgroundColor: "#1b2337",
+    borderColor: "#1b2337",
+  },
+  sortChipText: {
+    fontSize: 12,
+    color: "rgba(255,255,255,0.7)",
+  },
+  sortChipTextActive: {
+    color: "#ffffff",
+    fontWeight: "600",
+  },
+  filterChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  filterChipActive: {
+    backgroundColor: "rgba(15,176,106,0.16)",
+    borderColor: "#0fb06a",
+  },
+  filterChipText: {
+    fontSize: 11,
+    color: "rgba(255,255,255,0.7)",
+  },
+  filterChipTextActive: {
+    color: "#ffffff",
+    fontWeight: "600",
+  },
+  listDivider: {
+    height: 1,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    marginVertical: 4,
+  },
+  foodRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 6,
+  },
+  foodRowImage: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    marginRight: 10,
+  },
+  foodRowText: {
+    flex: 1,
+  },
+  foodRowName: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#ffffff",
+  },
+  foodRowMeta: {
+    fontSize: 12,
+    color: "rgba(255,255,255,0.65)",
+    marginTop: 2,
+  },
+  foodRowDelete: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
   },
 });

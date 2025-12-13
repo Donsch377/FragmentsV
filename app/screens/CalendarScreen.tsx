@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useFocusEffect } from "@react-navigation/native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Alert, FlatList, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { supabase } from "../lib/supabaseClient";
@@ -9,9 +10,9 @@ import type { FoodLogEntry } from "../types/food";
 import { FoodLogModal } from "../components/FoodLogModal";
 import { FoodLogDetailsModal } from "../components/FoodLogDetailsModal";
 
-type RangeOption = "1d" | "5d" | "7d" | "14d" | "Month";
+type RangeOption = "Day" | "Week" | "Month";
 
-const RANGE_OPTIONS: RangeOption[] = ["1d", "5d", "7d", "14d", "Month"];
+const RANGE_OPTIONS: RangeOption[] = ["Day", "Week", "Month"];
 
 type ServingField = keyof NonNullable<FoodLogEntry["serving"]>;
 
@@ -25,7 +26,7 @@ type NutritionMetric =
   | "Potassium"
   | "Sugar";
 
-const DEFAULT_NUTRITION_METRICS: NutritionMetric[] = ["Calories", "Protein", "Carbs"];
+const DEFAULT_NUTRITION_METRICS: NutritionMetric[] = [];
 
 const NUTRITION_FIELD_MAP: Record<
   NutritionMetric,
@@ -54,10 +55,8 @@ const formatDateKey = (date: Date) => {
 };
 
 const RANGE_DAY_COUNT: Record<RangeOption, number> = {
-  "1d": 0,
-  "5d": 5,
-  "7d": 7,
-  "14d": 14,
+  Day: 0,
+  Week: 7,
   Month: 0,
 };
 
@@ -131,7 +130,7 @@ const toDateOnly = (value?: string | null) => {
 
 export const CalendarScreen = () => {
   const { session } = useAuth();
-  const [range, setRange] = useState<RangeOption>("1d");
+  const [range, setRange] = useState<RangeOption>("Day");
   const [selectedMonthDate, setSelectedMonthDate] = useState<Date>(new Date());
   const [rawTasks, setRawTasks] = useState<TaskRecord[]>([]);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
@@ -242,17 +241,15 @@ export const CalendarScreen = () => {
           ) : (
             <>
               {nutritionMetrics.length ? (
-                <View style={styles.nutritionSummaryRow}>
+                <View style={styles.nutritionChipRow}>
                   {nutritionMetrics.map((metric) => (
-                    <View key={metric} style={styles.nutritionSummaryCard}>
-                      <Text style={styles.nutritionSummaryLabel}>{metric}</Text>
-                      {nutritionPrefsLoading && foodLogsLoading ? (
-                        <Text style={styles.nutritionSummaryValue}>Loading…</Text>
-                      ) : (
-                        <Text style={styles.nutritionSummaryValue}>
-                          {formatNutritionValue(metric, nutritionTotals[metric] ?? null)}
-                        </Text>
-                      )}
+                    <View key={metric} style={styles.nutritionChip}>
+                      <Text style={styles.nutritionChipLabel}>{metric}</Text>
+                      <Text style={styles.nutritionChipValue}>
+                        {nutritionPrefsLoading && foodLogsLoading
+                          ? "Loading…"
+                          : formatNutritionValue(metric, nutritionTotals[metric] ?? null)}
+                      </Text>
                     </View>
                   ))}
                 </View>
@@ -260,7 +257,7 @@ export const CalendarScreen = () => {
               {foodLogsLoading ? (
                 <Text style={styles.sectionSubheading}>Loading meals...</Text>
               ) : foodLogs.length === 0 ? (
-                <Text style={styles.sectionSubheading}>No meal data yet</Text>
+                <Text style={styles.sectionSubheading}>No meals logged yet.</Text>
               ) : (
                 foodLogs.map((entry) => (
                   <View key={entry.id} style={styles.mealRow}>
@@ -513,9 +510,11 @@ const renderMonthView = () => (
     loadFoodLogs();
   }, [loadFoodLogs]);
 
-  useEffect(() => {
-    loadNutritionPreferences();
-  }, [loadNutritionPreferences]);
+  useFocusEffect(
+    useCallback(() => {
+      loadNutritionPreferences();
+    }, [loadNutritionPreferences]),
+  );
 
   useEffect(() => {
     if (!session?.user) {
@@ -707,7 +706,7 @@ const renderMonthView = () => (
           })}
         </View>
 
-        {range === "1d" ? (
+        {range === "Day" ? (
           renderTodayView()
         ) : range === "Month" ? (
           renderMonthView()
@@ -752,9 +751,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#050505",
   },
   contentContainer: {
-    paddingHorizontal: 20,
-    paddingVertical: 24,
-    gap: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    gap: 16,
   },
   header: {
     gap: 4,
@@ -772,12 +771,12 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     borderRadius: 999,
     backgroundColor: "#0a0f1a",
-    padding: 4,
+    padding: 3,
     justifyContent: "space-between",
   },
   rangeButton: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: 7,
     borderRadius: 999,
     alignItems: "center",
   },
@@ -795,12 +794,13 @@ const styles = StyleSheet.create({
     color: "#ffffff",
   },
   section: {
-    borderRadius: 24,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.08)",
     backgroundColor: "#0a101b",
-    padding: 20,
-    gap: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    gap: 8,
   },
   sectionHeading: {
     fontSize: 18,
@@ -826,31 +826,30 @@ const styles = StyleSheet.create({
   taskButtonDisabled: {
     opacity: 0.4,
   },
-  nutritionSummaryRow: {
+  nutritionChipRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 12,
+    gap: 8,
     marginBottom: 4,
   },
-  nutritionSummaryCard: {
-    flexGrow: 1,
-    minWidth: 120,
-    borderRadius: 14,
+  nutritionChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderRadius: 999,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    padding: 12,
+    borderColor: "rgba(255,255,255,0.16)",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     backgroundColor: "rgba(15,176,106,0.06)",
   },
-  nutritionSummaryLabel: {
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-    fontSize: 11,
-    color: "rgba(255,255,255,0.65)",
-    marginBottom: 6,
+  nutritionChipLabel: {
+    fontSize: 12,
+    color: "rgba(255,255,255,0.8)",
   },
-  nutritionSummaryValue: {
-    fontSize: 16,
-    fontWeight: "700",
+  nutritionChipValue: {
+    marginLeft: 6,
+    fontSize: 12,
+    fontWeight: "600",
     color: "#ffffff",
   },
   taskButtonText: {

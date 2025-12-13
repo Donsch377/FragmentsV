@@ -324,11 +324,11 @@ const styles = StyleSheet.create({
     backgroundColor: "#050505",
   },
   contentContainer: {
-    paddingHorizontal: 20,
-    paddingVertical: 24,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
   },
   header: {
-    marginBottom: 20,
+    marginBottom: 16,
   },
   heading: {
     fontSize: 28,
@@ -341,14 +341,15 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.6)",
   },
   groupList: {
-    gap: 16,
+    gap: 10,
   },
   groupCard: {
-    borderRadius: 24,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.08)",
     backgroundColor: "#0b0f18",
-    padding: 18,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
   },
   cardHeader: {
     flexDirection: "row",
@@ -383,7 +384,7 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.75)",
   },
   groupMeta: {
-    marginTop: 12,
+    marginTop: 8,
     fontSize: 12,
     textTransform: "uppercase",
     letterSpacing: 1,
@@ -395,7 +396,7 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.5)",
   },
   primaryButtons: {
-    marginTop: 28,
+    marginTop: 20,
     gap: 12,
   },
   primaryButton: {

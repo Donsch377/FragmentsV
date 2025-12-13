@@ -6,10 +6,20 @@ import { CHAT_RESPONSE_MODES, DEFAULT_CHAT_RESPONSE_MODE, type ChatResponseMode 
 export type LlmProvider = "openSource" | "apple";
 
 type AiPreferencesValue = {
+  /**
+   * @deprecated Prefer textProvider for clarity. This alias is kept only for backward compatibility.
+   */
   provider: LlmProvider;
+  textProvider: LlmProvider;
+  imageProvider: LlmProvider;
   modelKey: OnDeviceModelKey;
   chatMode: ChatResponseMode;
+  /**
+   * @deprecated Prefer setTextProvider.
+   */
   setProvider: (provider: LlmProvider) => Promise<void>;
+  setTextProvider: (provider: LlmProvider) => Promise<void>;
+  setImageProvider: (provider: LlmProvider) => Promise<void>;
   setModelKey: (modelKey: OnDeviceModelKey) => Promise<void>;
   setChatMode: (mode: ChatResponseMode) => Promise<void>;
   hydrated: boolean;
@@ -19,9 +29,13 @@ const STORAGE_KEY = "fragments.aiPreferences";
 
 const AiPreferencesContext = createContext<AiPreferencesValue>({
   provider: "openSource",
+  textProvider: "openSource",
+  imageProvider: "apple",
   modelKey: DEFAULT_ON_DEVICE_MODEL,
   chatMode: DEFAULT_CHAT_RESPONSE_MODE,
   setProvider: async () => {},
+  setTextProvider: async () => {},
+  setImageProvider: async () => {},
   setModelKey: async () => {},
   setChatMode: async () => {},
   hydrated: false,
@@ -29,12 +43,15 @@ const AiPreferencesContext = createContext<AiPreferencesValue>({
 
 type PersistedShape = {
   provider?: LlmProvider;
+  textProvider?: LlmProvider;
+  imageProvider?: LlmProvider;
   modelKey?: OnDeviceModelKey;
   chatMode?: ChatResponseMode;
 };
 
 export const AiPreferencesProvider = ({ children }: { children: ReactNode }) => {
-  const [provider, setProvider] = useState<LlmProvider>("openSource");
+  const [textProvider, setTextProvider] = useState<LlmProvider>("openSource");
+  const [imageProvider, setImageProvider] = useState<LlmProvider>("apple");
   const [modelKey, setModelKey] = useState<OnDeviceModelKey>(DEFAULT_ON_DEVICE_MODEL);
   const [chatMode, setChatMode] = useState<ChatResponseMode>(DEFAULT_CHAT_RESPONSE_MODE);
   const [hydrated, setHydrated] = useState(false);
@@ -46,8 +63,11 @@ export const AiPreferencesProvider = ({ children }: { children: ReactNode }) => 
         const stored = await AsyncStorage.getItem(STORAGE_KEY);
         if (stored) {
           const parsed: PersistedShape = JSON.parse(stored);
-          if (parsed.provider) {
-            setProvider(parsed.provider);
+          if (parsed.textProvider || parsed.provider) {
+            setTextProvider(parsed.textProvider ?? parsed.provider ?? "openSource");
+          }
+          if (parsed.imageProvider || parsed.provider) {
+            setImageProvider(parsed.imageProvider ?? "apple");
           }
           if (parsed.modelKey) {
             setModelKey(parsed.modelKey);
@@ -76,7 +96,9 @@ export const AiPreferencesProvider = ({ children }: { children: ReactNode }) => 
         await AsyncStorage.setItem(
           STORAGE_KEY,
           JSON.stringify({
-            provider: next.provider ?? provider,
+            provider: next.textProvider ?? next.provider ?? textProvider,
+            textProvider: next.textProvider ?? textProvider,
+            imageProvider: next.imageProvider ?? imageProvider,
             modelKey: next.modelKey ?? modelKey,
             chatMode: next.chatMode ?? chatMode,
           }),
@@ -85,13 +107,21 @@ export const AiPreferencesProvider = ({ children }: { children: ReactNode }) => 
         console.warn("[AI prefs] Unable to persist preferences", error);
       }
     },
-    [chatMode, modelKey, provider],
+    [chatMode, imageProvider, modelKey, textProvider],
   );
 
-  const handleSetProvider = useCallback(
+  const handleSetTextProvider = useCallback(
     async (nextProvider: LlmProvider) => {
-      setProvider(nextProvider);
-      await persist({ provider: nextProvider });
+      setTextProvider(nextProvider);
+      await persist({ provider: nextProvider, textProvider: nextProvider });
+    },
+    [persist],
+  );
+
+  const handleSetImageProvider = useCallback(
+    async (nextProvider: LlmProvider) => {
+      setImageProvider(nextProvider);
+      await persist({ imageProvider: nextProvider });
     },
     [persist],
   );
@@ -117,15 +147,29 @@ export const AiPreferencesProvider = ({ children }: { children: ReactNode }) => 
 
   const value = useMemo(
     () => ({
-      provider,
+      provider: textProvider,
+      textProvider,
+      imageProvider,
       modelKey,
       chatMode,
-      setProvider: handleSetProvider,
+      setProvider: handleSetTextProvider,
+      setTextProvider: handleSetTextProvider,
+      setImageProvider: handleSetImageProvider,
       setModelKey: handleSetModelKey,
       setChatMode: handleSetChatMode,
       hydrated,
     }),
-    [chatMode, handleSetChatMode, handleSetModelKey, handleSetProvider, hydrated, modelKey, provider],
+    [
+      chatMode,
+      handleSetChatMode,
+      handleSetImageProvider,
+      handleSetModelKey,
+      handleSetTextProvider,
+      hydrated,
+      imageProvider,
+      modelKey,
+      textProvider,
+    ],
   );
 
   return <AiPreferencesContext.Provider value={value}>{children}</AiPreferencesContext.Provider>;
